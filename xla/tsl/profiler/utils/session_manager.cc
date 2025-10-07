@@ -143,6 +143,30 @@ RemoteProfilerSessionManagerOptions GetRemoteSessionManagerOptionsLocked(
             options.mutable_profiler_options()->set_session_id(value);
           },
           nullptr);
+    } else if (key == "tracemark_lower") {
+      SetOption<int>(
+          key, kw.second,
+          [](tensorflow::ProfileOptions* options, int value) {
+            options->mutable_advanced_configuration()->insert(
+                {"tracemark_lower",
+                 tensorflow::ProfileOptions::AdvancedConfigValue()});
+            options->mutable_advanced_configuration()
+                ->at("tracemark_lower")
+                .set_int64_value(value);
+          },
+          options.mutable_profiler_options());
+    } else if (key == "tracemark_upper") {
+      SetOption<int>(
+          key, kw.second,
+          [](tensorflow::ProfileOptions* options, int value) {
+            options->mutable_advanced_configuration()->insert(
+                {"tracemark_upper",
+                 tensorflow::ProfileOptions::AdvancedConfigValue()});
+            options->mutable_advanced_configuration()
+                ->at("tracemark_upper")
+                .set_int64_value(value);
+          },
+          options.mutable_profiler_options());
     } else {
       LOG(WARNING) << "Unrecognised key: " << key;
     }
