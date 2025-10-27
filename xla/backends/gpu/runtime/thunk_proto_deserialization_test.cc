@@ -46,6 +46,8 @@ using ::tsl::proto_testing::EqualsProto;
 using ::tsl::proto_testing::ParseTextProtoOrDie;
 using Kind = Thunk::Kind;
 
+constexpr absl::string_view kPlatformName = "gpu";
+
 TEST(ThunkProtoDeserializationTest, SequentialThunkChain) {
   constexpr ExecutionStreamId kExecutionStreamId{123};
   constexpr absl::string_view kProfileAnnotation = "profile_annotation";
@@ -64,7 +66,7 @@ TEST(ThunkProtoDeserializationTest, SequentialThunkChain) {
 
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto proto, outer_thunk.ToProto());
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> new_thunk,
-                          DeserializeThunkProto(proto, {}));
+                          DeserializeThunkProto(proto, {}, kPlatformName));
 
   EXPECT_THAT(new_thunk.get(),
               WhenDynamicCastTo<const SequentialThunk*>(Property(
@@ -91,8 +93,9 @@ TEST(ThunkProtoDeserializationTest, CopyThunk) {
       BufferAllocation(/*index=*/0, /*size=*/1024, /*color=*/0),
       BufferAllocation(/*index=*/1, /*size=*/1024, /*color=*/0)};
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> thunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> thunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
   auto* copy_thunk = dynamic_cast<CopyThunk*>(thunk.get());
   ASSERT_NE(copy_thunk, nullptr);  // Check the cast succeeded
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, copy_thunk->ToProto());
@@ -123,8 +126,9 @@ TEST(ThunkProtoDeserializationTest, DeviceToHostCopyThunk) {
       BufferAllocation(/*index=*/0, /*size=*/1024, /*color=*/0),
       BufferAllocation(/*index=*/1, /*size=*/1024, /*color=*/0)};
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> thunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> thunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
   auto* copy_thunk = dynamic_cast<DeviceToHostCopyThunk*>(thunk.get());
   ASSERT_NE(copy_thunk, nullptr);  // Check the cast succeeded
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, copy_thunk->ToProto());
@@ -155,8 +159,9 @@ TEST(ThunkProtoDeserializationTest, HostToDeviceCopyThunk) {
       BufferAllocation(/*index=*/0, /*size=*/1024, /*color=*/0),
       BufferAllocation(/*index=*/1, /*size=*/1024, /*color=*/0)};
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> thunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> thunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
   auto* copy_thunk = dynamic_cast<HostToDeviceCopyThunk*>(thunk.get());
   ASSERT_NE(copy_thunk, nullptr);  // Check the cast succeeded
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, copy_thunk->ToProto());
@@ -187,8 +192,9 @@ TEST(ThunkProtoDeserializationTest, DeviceToDeviceCopyThunk) {
       BufferAllocation(/*index=*/0, /*size=*/1024, /*color=*/0),
       BufferAllocation(/*index=*/1, /*size=*/1024, /*color=*/0)};
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> thunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> thunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
   auto* copy_thunk = dynamic_cast<DeviceToDeviceCopyThunk*>(thunk.get());
   ASSERT_NE(copy_thunk, nullptr);  // Check the cast succeeded
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, copy_thunk->ToProto());
@@ -264,8 +270,9 @@ TEST(ThunkProtoDeserializationTest, WhileThunk) {
       BufferAllocation(/*index=*/4, /*size=*/1024, /*color=*/0),
       BufferAllocation(/*index=*/5, /*size=*/1024, /*color=*/0)};
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> athunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> athunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
   auto* thunk = dynamic_cast<WhileThunk*>(athunk.get());
   ASSERT_NE(thunk, nullptr);
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, thunk->ToProto());
@@ -353,8 +360,9 @@ TEST(ThunkProtoDeserializationTest, ConditionalThunk) {
       BufferAllocation(/*index=*/4, /*size=*/1024, /*color=*/0),
       BufferAllocation(/*index=*/5, /*size=*/1024, /*color=*/0)};
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> athunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> athunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
   auto* thunk = dynamic_cast<ConditionalThunk*>(athunk.get());
   ASSERT_NE(thunk, nullptr);
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, thunk->ToProto());
@@ -370,7 +378,7 @@ TEST(ThunkProtoDeserializationTest, WaitForStreamsThunk) {
 
   TF_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<Thunk> thunk,
-      DeserializeThunkProto(proto, /*buffer_allocations=*/{}));
+      DeserializeThunkProto(proto, /*buffer_allocations=*/{}, kPlatformName));
 
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, thunk->ToProto());
   EXPECT_THAT(round_trip_proto, EqualsProto(proto));
@@ -391,8 +399,9 @@ TEST(ThunkProtoDeserializationTest, CudnnThunk) {
       BufferAllocation(/*index=*/1, /*size=*/1024, /*color=*/0),
   };
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> thunk,
-                          DeserializeThunkProto(proto, buffer_allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> thunk,
+      DeserializeThunkProto(proto, buffer_allocations, kPlatformName));
 
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, thunk->ToProto());
   EXPECT_THAT(round_trip_proto, EqualsProto(proto));
@@ -457,8 +466,9 @@ TEST(ThunkProtoDeserializationTest, CublasLtMatmulThunk) {
       BufferAllocation(/*index=*/5, /*size=*/161600, /*color=*/0),
   };
 
-  TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<Thunk> thunk,
-                          DeserializeThunkProto(proto, allocations));
+  TF_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<Thunk> thunk,
+      DeserializeThunkProto(proto, allocations, kPlatformName));
   TF_ASSERT_OK_AND_ASSIGN(ThunkProto round_trip_proto, thunk->ToProto());
   EXPECT_THAT(round_trip_proto, EqualsProto(proto));
 }
@@ -469,8 +479,9 @@ TEST(ThunkProtoDeserializationTest, EmptyThunkImplReturnsAnError) {
         thunk_info { execution_stream_id: 7 }
       )pb");
 
-  EXPECT_THAT(DeserializeThunkProto(proto, /*buffer_allocations=*/{}),
-              absl_testing::StatusIs(absl::StatusCode::kInvalidArgument));
+  EXPECT_THAT(
+      DeserializeThunkProto(proto, /*buffer_allocations=*/{}, kPlatformName),
+      absl_testing::StatusIs(absl::StatusCode::kInvalidArgument));
 }
 
 }  // namespace

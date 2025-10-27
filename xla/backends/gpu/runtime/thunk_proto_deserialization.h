@@ -19,6 +19,7 @@ limitations under the License.
 #include <memory>
 
 #include "absl/status/statusor.h"
+#include "absl/strings/string_view.h"
 #include "absl/types/span.h"
 #include "xla/backends/gpu/runtime/thunk.h"
 #include "xla/backends/gpu/runtime/thunk.pb.h"
@@ -29,7 +30,8 @@ namespace xla::gpu {
 // Deserializes the given `thunk_proto` into a Thunk.
 absl::StatusOr<std::unique_ptr<Thunk>> DeserializeThunkProto(
     const ThunkProto& thunk_proto,
-    absl::Span<const BufferAllocation> buffer_allocations);
+    absl::Span<const BufferAllocation> buffer_allocations,
+    absl::string_view platform_name);
 
 }  // namespace xla::gpu
 

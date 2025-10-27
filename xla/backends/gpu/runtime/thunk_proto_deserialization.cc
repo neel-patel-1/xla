@@ -31,6 +31,7 @@ limitations under the License.
 #include "xla/backends/gpu/runtime/convolution_reorder_thunk.h"
 #include "xla/backends/gpu/runtime/convolution_thunk.h"
 #include "xla/backends/gpu/runtime/copy_thunk.h"
+#include "xla/backends/gpu/runtime/cub_sort_thunk.h"
 #include "xla/backends/gpu/runtime/cudnn_thunk.h"
 #include "xla/backends/gpu/runtime/fft_thunk.h"
 #include "xla/backends/gpu/runtime/gemm_thunk.h"
@@ -71,15 +72,18 @@ static std::optional<absl::string_view> GetStoredThunkTypeName(
 
 absl::StatusOr<std::unique_ptr<Thunk>> DeserializeThunkProto(
     const ThunkProto& thunk_proto,
-    absl::Span<const BufferAllocation> buffer_allocations) {
+    absl::Span<const BufferAllocation> buffer_allocations,
+    absl::string_view platform_name) {
   TF_ASSIGN_OR_RETURN(Thunk::ThunkInfo thunk_info,
                       Thunk::ThunkInfo::FromProto(thunk_proto.thunk_info()));
+  auto deserializer = [buffer_allocations,
+                       platform_name](const ThunkProto& thunk_proto) {
+    return DeserializeThunkProto(thunk_proto, buffer_allocations,
+                                 platform_name);
+  };
 
   switch (thunk_proto.impl_case()) {
     case ThunkProto::kSequentialThunk: {
-      auto deserializer = [&buffer_allocations](const ThunkProto& thunk_proto) {
-        return DeserializeThunkProto(thunk_proto, buffer_allocations);
-      };
       return SequentialThunk::FromProto(
           std::move(thunk_info), thunk_proto.sequential_thunk(), deserializer);
     }
@@ -99,18 +103,13 @@ absl::StatusOr<std::unique_ptr<Thunk>> DeserializeThunkProto(
           std::move(thunk_info), thunk_proto.device_to_device_copy_thunk(),
           buffer_allocations);
     case ThunkProto::kWhileThunk:
-      return WhileThunk::FromProto(
-          std::move(thunk_info), thunk_proto.while_thunk(), buffer_allocations,
-          [&buffer_allocations](const ThunkProto& thunk_proto) {
-            return DeserializeThunkProto(thunk_proto, buffer_allocations);
-          });
+      return WhileThunk::FromProto(std::move(thunk_info),
+                                   thunk_proto.while_thunk(),
+                                   buffer_allocations, deserializer);
     case ThunkProto::kConditionalThunk:
-      return ConditionalThunk::FromProto(
-          std::move(thunk_info), thunk_proto.conditional_thunk(),
-          buffer_allocations,
-          [&buffer_allocations](const ThunkProto& thunk_proto) {
-            return DeserializeThunkProto(thunk_proto, buffer_allocations);
-          });
+      return ConditionalThunk::FromProto(std::move(thunk_info),
+                                         thunk_proto.conditional_thunk(),
+                                         buffer_allocations, deserializer);
     case ThunkProto::kGemmThunk:
       return GemmThunk::FromProto(std::move(thunk_info),
                                   thunk_proto.gemm_thunk(), buffer_allocations);
@@ -167,6 +166,10 @@ absl::StatusOr<std::unique_ptr<Thunk>> DeserializeThunkProto(
       return Memset32BitValueThunk::FromProto(
           std::move(thunk_info), thunk_proto.memset32bit_value_thunk(),
           buffer_allocations);
+    case ThunkProto::kCubSortThunk:
+      return CubSortThunk::FromProto(std::move(thunk_info),
+                                     thunk_proto.cub_sort_thunk(),
+                                     buffer_allocations, platform_name);
     default:
       std::optional<absl::string_view> unsupported_thunk_type =
           GetStoredThunkTypeName(thunk_proto);
