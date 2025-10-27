@@ -103,6 +103,7 @@ limitations under the License.
 #include "xla/backends/cpu/transforms/library_rewriter.h"
 #include "xla/backends/cpu/transforms/xnn_graph_fusion.h"
 #include "xla/backends/cpu/xnn_support.h"
+#include "xla/backends/cpu/ynn_support.h"
 #include "xla/hlo/analysis/alias_info.h"
 #include "xla/hlo/analysis/hlo_ordering.h"
 #include "xla/hlo/ir/dfs_hlo_visitor_with_default.h"
@@ -255,10 +256,6 @@ limitations under the License.
 #include "xla/service/cpu/onednn_float_support.h"
 #include "xla/service/cpu/onednn_ops_rewriter.h"
 #endif  // XLA_ONEDNN
-
-#ifdef XLA_YNNPACK
-#include "xla/backends/cpu/ynn_support.h"
-#endif  // XLA_YNNPACK
 
 namespace xla {
 namespace {
@@ -553,7 +550,6 @@ auto LibrarySupportsDot(HloModule* module,
       module->config().debug_options().xla_cpu_experimental_ynn_fusion_type(),
       DebugOptions::LIBRARY_FUSION_TYPE_INDIVIDUAL_DOT);
   return [=](const HloInstruction& instr) {
-#ifdef XLA_YNNPACK
     if (ynnpack_dot_enabled &&
         IsDotSupportedByYnn(instr.dot_dimension_numbers(),
                             instr.operand(0)->shape(),
@@ -561,7 +557,6 @@ auto LibrarySupportsDot(HloModule* module,
             .value_or(false)) {
       return true;
     }
-#endif  // XLA_YNNPACK
 
     if (xnnpack_dot_enabled &&
         IsDotSupportedByXnn(instr.dot_dimension_numbers(),
