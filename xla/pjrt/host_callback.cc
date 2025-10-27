@@ -182,6 +182,6 @@ CreateHostCallbackStateAndAppendSendRecvCallbacks(
 ffi::TypeId FfiLoadedHostCallbacks::id = {7357244197867843242};
 XLA_FFI_REGISTER_TYPE(ffi::GetXlaFfiApi(), "FfiLoadedHostCallbacks",
                       &FfiLoadedHostCallbacks::id,
-                      ffi::TypeInfo<FfiLoadedHostCallbacks>());
+                      ffi::MakeTypeInfo<FfiLoadedHostCallbacks>());
 
 }  // namespace xla

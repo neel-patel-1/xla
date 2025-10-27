@@ -1219,7 +1219,6 @@ struct ResultEncoding<ExecutionStage::kInstantiate,
       args.ctx = ctx;
       args.type_id = &T::id;
       args.state = state.value().release();
-      args.deleter = +[](void* state) { delete reinterpret_cast<T*>(state); };
       return api->XLA_FFI_State_Set(&args);
     }
 
@@ -1505,6 +1504,11 @@ inline ThreadPool::ThreadPool(const XLA_FFI_Api* api,
 
 template <typename T>
 constexpr XLA_FFI_TypeInfo TypeInfo() {
+  return XLA_FFI_TypeInfo{[](void* ptr) { delete static_cast<T*>(ptr); }};
+}
+
+template <typename T>
+constexpr XLA_FFI_TypeInfo MakeTypeInfo() {
   return XLA_FFI_TypeInfo{[](void* ptr) { delete static_cast<T*>(ptr); }};
 }
 
