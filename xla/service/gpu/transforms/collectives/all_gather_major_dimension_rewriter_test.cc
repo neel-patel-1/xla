@@ -43,6 +43,17 @@ ag = s4[32,16,32] all-gather(a), dimensions={0}
 }
 
 TEST_F(AllGatherMajorDimensionRewriterTest,
+       AllGatherOnNonDefaultLayoutIsSkipped) {
+  CheckRewrite(R"(
+e {
+  a = s4[3,3]{0,1} parameter(0)
+  b = s8[3,3]{0,1} parameter(1)
+  ag = (s4[3,3], s8[3,3]) all-gather(a, b), dimensions={1}
+})",
+               std::nullopt);
+}
+
+TEST_F(AllGatherMajorDimensionRewriterTest,
        AllGatherOnLastDimensionIsTransformedCorrectly) {
   CheckRewrite(R"(
 e {

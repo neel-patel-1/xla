@@ -4571,7 +4571,7 @@ TEST_F(CollectiveOpsTestE2E, OptimizedSubByteAllGatherOnDim1OutputIsCorrect) {
   }
 }
 
-TEST_P(AllReduceTest, AllGatherOnChangedDimensionIsCorrect) {
+TEST_F(CollectiveOpsTestE2E, AllGatherOnChangedDimensionIsCorrect) {
   const int64_t kNumReplicas = 2;
   ASSERT_GE(hlo_runner_->device_count(), kNumReplicas)
       << "The test requires at least " << kNumReplicas << " devices";

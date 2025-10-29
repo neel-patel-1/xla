@@ -28,6 +28,10 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
+// Replaces all-gathers on dimension index other than 0 with ones
+// that gather the dimension index 0 and then transpose the result to the
+// required layout. Otherwise the layout assignment inserts two transposes,
+// before and after the all-gather.
 class AllGatherMajorDimensionRewriter : public HloModulePass {
  public:
   AllGatherMajorDimensionRewriter() = default;

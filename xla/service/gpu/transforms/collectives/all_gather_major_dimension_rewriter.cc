@@ -16,9 +16,9 @@ limitations under the License.
 #include "xla/service/gpu/transforms/collectives/all_gather_major_dimension_rewriter.h"
 
 #include <cstdint>
-#include <vector>
 
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -27,6 +27,7 @@ limitations under the License.
 #include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
+#include "xla/permutation_util.h"
 #include "xla/service/hlo_creation_utils.h"
 #include "xla/shape_util.h"
 
@@ -45,7 +46,7 @@ absl::Status AllGatherMajorDimensionRewriter::Visitor::HandleAllGather(
   HloComputation* computation = instruction->parent();
   const int64_t operand_count = all_gather->operand_count();
 
-  const Shape& first_input_shape = all_gather->mutable_operand(0)->shape();
+  const Shape& first_input_shape = all_gather->operand(0)->shape();
   const Shape& first_output_shape = operand_count == 1
                                         ? all_gather->shape()
                                         : all_gather->shape().tuple_shapes(0);
@@ -53,20 +54,25 @@ absl::Status AllGatherMajorDimensionRewriter::Visitor::HandleAllGather(
       first_output_shape.dimensions(original_gather_dim) /
       first_input_shape.dimensions(original_gather_dim);
 
-  std::vector<Shape> new_all_gather_shapes;
-  std::vector<HloInstruction*> operands;
+  absl::InlinedVector<Shape, 1> new_all_gather_shapes;
+  absl::InlinedVector<HloInstruction*, 1> operands;
   for (int64_t i = 0; i < operand_count; ++i) {
     HloInstruction* operand = all_gather->mutable_operand(i);
     const Shape& input_shape = operand->shape();
-    std::vector<int64_t> new_input_dims(input_shape.dimensions().begin(),
-                                        input_shape.dimensions().end());
+    if (!LayoutUtil::IsMonotonicWithDim0Major(input_shape.layout())) {
+      // The pass is designed to run before layout assignment, layouts are
+      // expected to be default.
+      return absl::OkStatus();
+    }
+    absl::InlinedVector<int64_t, 4> new_input_dims(
+        input_shape.dimensions().begin(), input_shape.dimensions().end());
     new_input_dims[0] *= replica_count;
     new_all_gather_shapes.push_back(
         ShapeUtil::MakeShape(input_shape.element_type(), new_input_dims));
     operands.push_back(operand);
   }
 
-  Shape new_all_gather_shape =
+  const Shape new_all_gather_shape =
       operand_count == 1 ? new_all_gather_shapes[0]
                          : ShapeUtil::MakeTupleShape(new_all_gather_shapes);
 
@@ -74,7 +80,7 @@ absl::Status AllGatherMajorDimensionRewriter::Visitor::HandleAllGather(
       all_gather->CloneWithNewOperands(new_all_gather_shape, operands));
   Cast<HloAllGatherInstruction>(new_all_gather)->set_all_gather_dimension(0);
 
-  std::vector<HloInstruction*> final_results;
+  absl::InlinedVector<HloInstruction*, 1> final_results;
   for (int64_t i = 0; i < operand_count; ++i) {
     HloInstruction* operand = all_gather->mutable_operand(i);
     const Shape& input_shape = operand->shape();
@@ -88,34 +94,24 @@ absl::Status AllGatherMajorDimensionRewriter::Visitor::HandleAllGather(
             : computation->AddInstruction(
                   HloInstruction::CreateGetTupleElement(new_all_gather, i));
 
-    std::vector<int64_t> first_reshape_dims;
+    absl::InlinedVector<int64_t, 4> first_reshape_dims;
     first_reshape_dims.push_back(replica_count);
-    for (int64_t dim : input_shape.dimensions()) {
-      first_reshape_dims.push_back(dim);
-    }
+    absl::c_copy(input_shape.dimensions(),
+                 std::back_inserter(first_reshape_dims));
     TF_ASSIGN_OR_RETURN(HloInstruction * first_reshape,
                         MakeReshapeHlo(first_reshape_dims, ag_result));
 
-    std::vector<int64_t> transpose_order;
+    absl::InlinedVector<int64_t, 4> transpose_order;
     for (int64_t j = 0; j < input_shape.dimensions().size(); ++j) {
-      if (j < original_gather_dim) {
-        transpose_order.push_back(j + 1);
-      } else if (j == original_gather_dim) {
+      if (j == original_gather_dim) {
         transpose_order.push_back(0);
-        transpose_order.push_back(j + 1);
-      } else {
-        transpose_order.push_back(j + 1);
       }
-    }
-    std::vector<int64_t> transpose_shape_dims;
-    transpose_shape_dims.reserve(transpose_order.size());
-    for (const int64_t i : transpose_order) {
-      transpose_shape_dims.push_back(first_reshape_dims[i]);
+      transpose_order.push_back(j + 1);
     }
     HloInstruction* transpose =
         computation->AddInstruction(HloInstruction::CreateTranspose(
             ShapeUtil::MakeShape(input_shape.element_type(),
-                                 transpose_shape_dims),
+                                 Permute(first_reshape_dims, transpose_order)),
             first_reshape, transpose_order));
 
     TF_ASSIGN_OR_RETURN(HloInstruction * final_reshape,
