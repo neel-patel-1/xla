@@ -14,13 +14,18 @@ limitations under the License.
 ==============================================================================*/
 
 #include <cstdint>
+#include <iterator>
+#include <limits>
 #include <memory>
 #include <utility>
 
 #include "absl/log/check.h"
+#include "absl/log/log.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Support/raw_ostream.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
+#include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypeInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Diagnostics.h"
@@ -33,6 +38,7 @@ limitations under the License.
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "stablehlo/dialect/StablehloOps.h"
 #include "xla/codegen/emitter_loc_op_builder.h"
+#include "third_party/triton/include/triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 
 namespace mlir::triton::xla {
@@ -142,14 +148,92 @@ class LowerBroadcastInDim
   }
 };
 
+class LowerDot : public mlir::OpRewritePattern<stablehlo::DotOp> {
+ public:
+  using OpRewritePattern::OpRewritePattern;
+
+ private:
+  mlir::LogicalResult matchAndRewrite(
+      stablehlo::DotOp op, mlir::PatternRewriter& rewriter) const override {
+    if (std::distance(op->getUsers().begin(), op->getUsers().end()) != 1) {
+      return rewriter.notifyMatchFailure(
+          op->getLoc(),
+          "Dot op must have exactly one user in order to be lowered to "
+          "triton.");
+    }
+
+    auto add_op = dyn_cast<stablehlo::AddOp>(*op->getUsers().begin());
+    if (!add_op) {
+      return rewriter.notifyMatchFailure(
+          op->getLoc(),
+          "Dot op must be consumed by an AddOp in order to be convertible to "
+          "triton dot.");
+    }
+
+    // Accumulator is the operand of add that is not the dot operation.
+    auto accumulator =
+        add_op.getRhs() == op ? add_op.getLhs() : add_op.getRhs();
+
+    stablehlo::Precision precision = stablehlo::Precision::HIGHEST;
+
+    if (op.getPrecisionConfig().has_value()) {
+      mlir::ArrayAttr precision_config = op.getPrecisionConfig().value();
+      if (!precision_config.empty()) {
+        auto precision_attr = mlir::cast<stablehlo::PrecisionAttr>(
+            precision_config.getValue()[0]);
+        precision = precision_attr.getValue();
+      }
+    }
+
+    ttir::InputPrecision triton_input_precision = ttir::InputPrecision::IEEE;
+    switch (precision) {
+      case stablehlo::Precision::DEFAULT:
+        triton_input_precision = ttir::InputPrecision::TF32;
+        break;
+      case stablehlo::Precision::HIGH:
+        triton_input_precision = ttir::InputPrecision::TF32x3;
+        break;
+      case stablehlo::Precision::HIGHEST:
+        triton_input_precision = ttir::InputPrecision::IEEE;
+        break;
+      default:
+        return rewriter.notifyMatchFailure(op->getLoc(),
+                                           "Unsupported precision in dot op.");
+    }
+
+    int max_num_imprecise_acc = 0;
+
+    if (op.getLhs().getType().getElementType().isFloat(8) ||
+        op.getRhs().getType().getElementType().isFloat(8)) {
+      // For fp8 dots, disable accumulator promotion to mimick cuBLAS. It may
+      // make sense to enable frequent accumulator promotion at higher matmul
+      // precisions set in the config.
+      max_num_imprecise_acc = std::numeric_limits<int>::max();
+    }
+
+    if (triton_input_precision == ttir::InputPrecision::IEEE) {
+      max_num_imprecise_acc = 0;
+    }
+
+    auto triton_dot_op =
+        ttir::DotOp::create(rewriter, op.getLoc(), op.getResult().getType(),
+                            op.getLhs(), op.getRhs(), accumulator,
+                            triton_input_precision, max_num_imprecise_acc);
+
+    rewriter.replaceAllOpUsesWith(add_op, op.getResult());
+    rewriter.replaceOp(op, triton_dot_op);
+    return mlir::success();
+  }
+};
+
 class StableHLOLowerToTritonPass
     : public impl::StableHLOLowerToTritonPassBase<StableHLOLowerToTritonPass> {
  public:
   void runOnOperation() override {
     mlir::MLIRContext* mlir_context = &getContext();
     mlir::RewritePatternSet patterns(mlir_context);
-    patterns.add<LowerTranspose, LowerIotaToMakeRange, LowerBroadcastInDim>(
-        mlir_context);
+    patterns.add<LowerTranspose, LowerIotaToMakeRange, LowerBroadcastInDim,
+                 LowerDot>(mlir_context);
 
     if (mlir::failed(
             mlir::applyPatternsGreedily(getOperation(), std::move(patterns)))) {

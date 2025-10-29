@@ -36,6 +36,7 @@ limitations under the License.
 #include "mlir/IR/TypeUtilities.h"
 #include "mlir/IR/Value.h"
 #include "mlir/Support/LLVM.h"
+#include "stablehlo/dialect/StablehloOps.h"
 #include "xla/backends/gpu/codegen/triton/emitter_helpers.h"
 #include "xla/codegen/emitter_loc_op_builder.h"
 #include "xla/hlo/ir/hlo_instruction.h"
@@ -71,8 +72,8 @@ struct PrecisionSpec {
   // are currently a (XLA-wide) bridge to work with ALG_UNSET.
   PrecisionConfig::Precision lhs_operand_precision;
   PrecisionConfig::Precision rhs_operand_precision;
-  // Encodes `tt.dot`'s `inputPrecision` attribute.
-  ttir::InputPrecision ttir_input_precision;
+  // Encodes `stablehlo.dot`'s `precision` attribute.
+  mlir::stablehlo::Precision stablehlo_input_precision;
 };
 
 using AlgorithmEmitter = absl::StatusOr<Value> (*)(EmitterLocOpBuilder,
@@ -171,10 +172,27 @@ absl::StatusOr<Value> ScaledDot(EmitterLocOpBuilder b,
       rhs_dot_elem_type, true);
 }
 
+namespace {
+
+Value EmitStableHloDotAndAdd(EmitterLocOpBuilder b, Value lhs, Value rhs,
+                             Value acc,
+                             mlir::stablehlo::Precision input_precision) {
+  mlir::stablehlo::PrecisionAttr precisionAttr =
+      mlir::stablehlo::PrecisionAttr::get(b.getContext(), input_precision);
+  mlir::ArrayAttr precisionConfig =
+      mlir::ArrayAttr::get(b.getContext(), {precisionAttr});
+  auto dot = b.create<mlir::stablehlo::DotOp>(acc.getType(), lhs, rhs,
+                                              precisionConfig);
+
+  return b.create<mlir::stablehlo::AddOp>(acc, dot);
+}
+
+}  // namespace
+
 Value IEEEDot(EmitterLocOpBuilder b, Value lhs, Value rhs, Value acc) {
-  return b.create<ttir::DotOp>(lhs, rhs, acc,
-                               /*inputPrecision=*/ttir::InputPrecision::IEEE,
-                               /*maxNumImpreciseAcc=*/0);
+  return EmitStableHloDotAndAdd(
+      b, lhs, rhs, acc,
+      /*input_precision=*/mlir::stablehlo::Precision::HIGHEST);
 }
 
 // Leverages BF16 datatype for F32 matmul computation. It follows the guidance
@@ -285,14 +303,14 @@ bool IsTf32Allowed(const HloDotInstruction& dot) {
   return algorithm_util::HasTf32InputType(precision_config.algorithm());
 }
 
-ttir::InputPrecision InferDotPrecision(const HloDotInstruction& dot) {
+mlir::stablehlo::Precision InferDotPrecision(const HloDotInstruction& dot) {
   if (dot.precision_config().algorithm() ==
       PrecisionConfig::ALG_DOT_TF32_TF32_F32_X3) {
-    return ttir::InputPrecision::TF32x3;
+    return mlir::stablehlo::Precision::HIGH;
   }
 
-  return IsTf32Allowed(dot) ? ttir::InputPrecision::TF32
-                            : ttir::InputPrecision::IEEE;
+  return IsTf32Allowed(dot) ? mlir::stablehlo::Precision::DEFAULT
+                            : mlir::stablehlo::Precision::HIGHEST;
 }
 
 absl::StatusOr<Type> GetAlgUnsetAccumulatorType(EmitterLocOpBuilder b,
@@ -334,18 +352,9 @@ absl::StatusOr<Value> EmitDotAlgUnset(EmitterLocOpBuilder b,
   Value rhs = dot_operands.rhs;
   Value acc = dot_operands.accumulator;
 
-  int max_num_imprecise_acc = 0;
-  if (ElementType(lhs).isFloat(8) || ElementType(rhs).isFloat(8)) {
-    // For fp8 dots, disable accumulator promotion to mimick cuBLAS. It may make
-    // sense to enable frequent accumulator promotion at higher matmul
-    // precisions set in the config.
-    max_num_imprecise_acc = std::numeric_limits<int>::max();
-  }
-
-  return b.create<ttir::DotOp>(
-      lhs, rhs, acc,
-      /*inputPrecision=*/precision_spec.ttir_input_precision,
-      /*maxNumImpreciseAcc=*/max_num_imprecise_acc);
+  return EmitStableHloDotAndAdd(
+      b, lhs, rhs, acc,
+      /*input_precision=*/precision_spec.stablehlo_input_precision);
 }
 
 absl::StatusOr<Value> EmitRegularDot(EmitterLocOpBuilder b,
@@ -353,14 +362,6 @@ absl::StatusOr<Value> EmitRegularDot(EmitterLocOpBuilder b,
                                      const PrecisionSpec& precision_spec) {
   Value lhs = dot_operands.lhs;
   Value rhs = dot_operands.rhs;
-
-  int max_num_imprecise_acc = 0;
-  if (ElementType(lhs).isFloat(8) || ElementType(rhs).isFloat(8)) {
-    // For fp8 dots, disable accumulator promotion to mimick cuBLAS. It may make
-    // sense to enable frequent accumulator promotion at higher matmul
-    // precisions set in the config.
-    max_num_imprecise_acc = std::numeric_limits<int>::max();
-  }
 
   // Cast F32 inputs to BF16 if the algorithm is BF16_BF16_F32.
   // TODO(bchetioui): abstract this.
@@ -374,10 +375,9 @@ absl::StatusOr<Value> EmitRegularDot(EmitterLocOpBuilder b,
     }
   }
 
-  return b.create<ttir::DotOp>(
-      dot_operands.lhs, dot_operands.rhs, dot_operands.accumulator,
-      /*inputPrecision=*/precision_spec.ttir_input_precision,
-      /*maxNumImpreciseAcc=*/max_num_imprecise_acc);
+  return EmitStableHloDotAndAdd(
+      b, dot_operands.lhs, dot_operands.rhs, dot_operands.accumulator,
+      /*input_precision=*/precision_spec.stablehlo_input_precision);
 }
 
 // Returns an emitter for the given dot algorithm. Raises an

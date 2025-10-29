@@ -427,6 +427,7 @@ cc_library(
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MathDialect",
         "@llvm-project//mlir:Support",
+        "@stablehlo//:stablehlo_ops",
         "@triton//:TritonDialects",
         "@tsl//tsl/platform:tensor_float_32_hdr_lib",
     ],
