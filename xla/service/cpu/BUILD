@@ -1,11 +1,3 @@
-# Description:
-#    LLVM-based CPU backend for XLA.
-
-load(
-    "//third_party/compute_library:build_defs.bzl",
-    "acl_deps",
-    "if_enable_acl",
-)
 load(
     "//xla:xla.default.bzl",
     "xla_cc_test",
@@ -59,7 +51,6 @@ filegroup(
     name = "runtime_srcs",
     srcs = [
         # Single-threaded support.
-        "runtime_custom_call_status.cc",
         "runtime_fp16.cc",
         "runtime_key_value_sort.cc",
         "runtime_pow.cc",
@@ -94,7 +85,6 @@ filegroup(
     name = "runtime_hdrs",
     srcs = [
         # Single-threaded support.
-        "runtime_custom_call_status.h",
         "runtime_fp16.h",
         "runtime_key_value_sort.h",
         "runtime_pow.h",
@@ -575,17 +565,14 @@ cc_library(
         "windows_compatibility.h",
     ],
     hdrs = ["runtime_symbol_generator.h"],
-    copts = if_enable_acl(["-DXLA_CPU_USE_ACL=1"]) + tsl_copts(),
+    copts = tsl_copts(),
     deps = [
         ":cpu_runtime",
         ":runtime_conv2d",
-        ":runtime_conv2d_acl",
         ":runtime_conv3d",
-        ":runtime_custom_call_status",
         ":runtime_fp16",
         ":runtime_key_value_sort",
         ":runtime_matmul",
-        ":runtime_matmul_acl",
         ":runtime_pow",
         ":runtime_single_threaded_conv2d",
         ":runtime_single_threaded_conv3d",
@@ -1153,18 +1140,6 @@ cc_library(
 )
 
 cc_library(
-    name = "runtime_custom_call_status",
-    srcs = ["runtime_custom_call_status.cc"],
-    hdrs = ["runtime_custom_call_status.h"],
-    copts = runtime_copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        "//xla/service:custom_call_status_internal",
-        "@com_google_absl//absl/base:core_headers",
-    ],
-)
-
-cc_library(
     name = "runtime_matmul",
     srcs = [
         "runtime_matmul_c128.cc",
@@ -1187,46 +1162,6 @@ cc_library(
         "@com_google_absl//absl/synchronization",  # build_cleaner: keep
         "@eigen_archive//:eigen3",
     ],
-)
-
-cc_library(
-    name = "runtime_matmul_acl",
-    srcs = ["runtime_matmul_acl.cc"],
-    hdrs = ["runtime_matmul_acl.h"],
-    copts = tsl_copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":runtime_lightweight_check",
-        ":runtime_matmul",
-        "//xla:executable_run_options",
-        "//xla/tsl/platform:dynamic_annotations",
-        "@com_google_absl//absl/base",
-        "@eigen_archive//:eigen3",
-        "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:types",
-    ] + acl_deps(),
-)
-
-cc_library(
-    name = "runtime_conv2d_acl",
-    srcs = [
-        "runtime_conv2d_acl.cc",
-    ],
-    hdrs = ["runtime_conv2d_acl.h"],
-    copts = tsl_copts(),
-    visibility = ["//visibility:public"],
-    deps = [
-        ":runtime_conv2d",
-        ":runtime_lightweight_check",
-        ":runtime_single_threaded_conv2d",
-        "//xla:executable_run_options",
-        "//xla/tsl/framework/convolution:eigen_helpers",
-        "//xla/tsl/platform:dynamic_annotations",
-        "@com_google_absl//absl/base",
-        "@eigen_archive//:eigen3",
-        "@tsl//tsl/platform:logging",
-        "@tsl//tsl/platform:types",
-    ] + acl_deps(),
 )
 
 cc_library(
@@ -1344,9 +1279,7 @@ xla_cc_test(
     tags = ["optonly"],
     deps = [
         ":cpu_runtime",
-        ":runtime_custom_call_status",
         ":runtime_matmul",
-        ":runtime_matmul_acl",
         ":runtime_single_threaded_matmul",
         "//xla:array2d",
         "//xla:executable_run_options",
