@@ -41,6 +41,7 @@ limitations under the License.
 #include "absl/types/span.h"
 #include "xla/array.h"
 #include "xla/hlo/ir/hlo_op_metadata.h"
+#include "xla/hlo/ir/named_sharding.h"
 #include "xla/overflow_util.h"
 #include "xla/printer.h"
 #include "xla/shape.h"
@@ -140,7 +141,11 @@ bool NextIndex(absl::InlinedVector<int64_t, 6>* index,
 }  // namespace
 
 HloSharding HloSharding::AssignDevice(int64_t device_id,
-                                      absl::Span<const OpMetadata> metadata) {
+                                      absl::Span<const OpMetadata> metadata,
+                                      bool use_named_sharding) {
+  if (use_named_sharding) {
+    return HloSharding(NamedSharding::MaximalSharding(device_id, metadata));
+  }
   return HloSharding(device_id, metadata);
 }
 
@@ -521,7 +526,9 @@ bool HloSharding::UsesDevice(int64_t device) const {
       return s.UsesDevice(device);
     });
   }
-  return replicated_ || manual_ || tile_assignment_.UsesDevice(device);
+
+  return IsReplicatedLeaf() || IsManualLeaf() ||
+         device_assignment().UsesDevice(device);
 }
 
 std::map<int64_t, int64_t> HloSharding::UsedDevices(int64_t* count) const {
@@ -761,8 +768,9 @@ std::optional<int64_t> HloSharding::UniqueDevice() const {
     }
     return unique_device;
   }
-  if (!replicated_ && maximal_) {
-    return static_cast<int64_t>(*tile_assignment_.array().begin());
+
+  if (!IsReplicatedLeaf() && IsTileMaximalLeaf()) {
+    return static_cast<int64_t>(*device_assignment().array().begin());
   }
   return std::nullopt;
 }
@@ -823,16 +831,16 @@ absl::Status HloSharding::ValidateNonTuple(
     return absl::InvalidArgumentError(
         "Validation shape is a tuple but sharding is not.");
   }
-  if (replicated_) {
+  if (IsReplicatedLeaf()) {
     return absl::OkStatus();
   }
 
   // All tile assignments must be less than the number of available devices and
   // unique.
   bool all_devices_seen;
-  if (!tile_assignment_.iota_) {
+  if (!device_assignment().iota_) {
     absl::flat_hash_set<int64_t> seen_devices;
-    absl::Status status = tile_assignment_.array().EachStatus(
+    absl::Status status = device_assignment().array().EachStatus(
         [&num_devices, &seen_devices](absl::Span<const int64_t> indices,
                                       int32_t device) {
           if (num_devices.has_value() && device >= *num_devices) {
@@ -850,8 +858,9 @@ absl::Status HloSharding::ValidateNonTuple(
     all_devices_seen =
         !num_devices.has_value() || seen_devices.size() == *num_devices;
   } else {
-    all_devices_seen = !num_devices.has_value() ||
-                       tile_assignment_.iota_->num_elements() == *num_devices;
+    all_devices_seen =
+        !num_devices.has_value() ||
+        device_assignment().iota_->num_elements() == *num_devices;
   }
 
   if (IsTileMaximal() || IsManual() || IsUnreduced() || IsUnknown()) {
@@ -874,13 +883,31 @@ absl::Status HloSharding::ValidateNonTuple(
   }
 
   // The correct constructor has to be used to create tile maximal shardings.
-  if (tile_assignment_.num_elements() == 1) {
+  if (device_assignment().num_elements() == 1) {
     return tsl::errors::InvalidArgument(
         "Tile assignment only contains a single device. If a replicated "
         "sharding was intended, use HloSharding::Replicated(). If a device "
         "placement was intended, use HloSharding::AssignDevice()");
   }
   return absl::OkStatus();
+}
+
+const TileAssignment& HloSharding::device_assignment() const {
+  // Dimensions of `named_sharding_->device_assignment()` and `tile_assignment_`
+  // may differ. `named_sharding_->device_assignment()` reflects the device
+  // order in the original mesh, whereas `tile_assignment_` might have reshaped
+  // this original device order to accommodate tiling and subgroup shardings.
+  // However, the underlying set of devices and their relative order remain
+  // consistent in both representations.
+  //
+  // For example, a device_assignment` of {{0, 1}, {2, 3}} is equivalent to a
+  // `tile_assignment_` like {[2,1,2]0,1,2,3}. The latter includes extra
+  // dimensions to handle subgroups, but both represent the same underlying
+  // device ordering: [0, 1, 2, 3].
+  if (UseNamedShardingLeaf()) {
+    return named_sharding_->device_assignment();
+  }
+  return tile_assignment_;
 }
 
 /*static*/ absl::StatusOr<HloSharding> HloSharding::FromProto(

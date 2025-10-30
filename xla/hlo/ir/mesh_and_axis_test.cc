@@ -176,4 +176,37 @@ TEST(MeshAndAxisTest, MeshRoundtripProto) {
   EXPECT_THAT(mesh_non_iota, Mesh::FromProto(mesh_non_iota.ToProto()));
 }
 
+TEST(MeshAndAxisTest, EmptyMesh) {
+  Mesh empty_mesh;
+  EXPECT_EQ(Mesh(), Mesh());
+  EXPECT_NE(Mesh(), Mesh(5));
+  EXPECT_NE(Mesh(), Mesh({1}, {"a"}));
+  EXPECT_FALSE(empty_mesh.IsMaximal());
+  EXPECT_THAT(empty_mesh.ToProto(), EqualsProto(MeshProto()));
+  EXPECT_EQ(Mesh(), Mesh::FromProto(MeshProto()));
+  EXPECT_EQ(empty_mesh, Mesh::FromProto(empty_mesh.ToProto()));
+}
+
+TEST(MeshAndAxisTest, MaximalMesh) {
+  Mesh maximal_mesh(5);
+  EXPECT_TRUE(maximal_mesh.IsMaximal());
+  Mesh non_maximal_mesh({2, 3}, {"a", "b"});
+  EXPECT_FALSE(non_maximal_mesh.IsMaximal());
+  Mesh mesh_single_axis({2}, {"a"});
+  EXPECT_FALSE(mesh_single_axis.IsMaximal());
+
+  EXPECT_EQ(Mesh(5), Mesh(5));
+  EXPECT_NE(Mesh(5), Mesh(6));
+
+  MeshProto expected_proto;
+  expected_proto.add_device_ids(5);
+  EXPECT_THAT(maximal_mesh.ToProto(), EqualsProto(expected_proto));
+
+  MeshProto from_proto;
+  from_proto.add_device_ids(7);
+  EXPECT_EQ(Mesh(7), Mesh::FromProto(from_proto));
+
+  EXPECT_EQ(maximal_mesh, Mesh::FromProto(maximal_mesh.ToProto()));
+}
+
 }  // namespace xla

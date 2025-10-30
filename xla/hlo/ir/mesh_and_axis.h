@@ -34,14 +34,20 @@ namespace xla {
 // C++ representation for corresponding `OpSharding::Mesh` proto so same
 // documentation applies, except device assignment is represented in the array
 // format instead of list of device ids to align with various array specific
-// queries. Note that `TileAssignment` is used instead of `xla::Array` for
-// optimized array representation in iota based cases which is the most common
-// case.
+// queries. `TileAssignment` is used instead of `xla::Array` for optimized array
+// representation in iota based cases which is the most common case. Axis sizes
+// are not stored separately as dimensions of `device_assignment` array
+// represent axis sizes, except in the case of maximal mesh where
+// `device_assignment` will contain a single device id but `axes_names` will be
+// empty.
 //
 // Example: device_assignment {{3, 0, 2}, {1, 4, 5}} with axes names {"data",
 // "model"} represents the mesh ["data"=2, "model"=3].
 class Mesh {
  public:
+  // Empty mesh
+  explicit Mesh() : device_assignment_(), axes_names_() {};
+
   // Constructs an iota device assignment mesh with given axes sizes and names.
   //
   // Example: axes_sizes {2, 3} and axes_names {"data", "model"} represent the
@@ -59,6 +65,9 @@ class Mesh {
                  std::move(device_assignment))),
              axes_names) {}
 
+  // Maximal Mesh
+  explicit Mesh(int64_t device_id) : device_assignment_(device_id) {}
+
   explicit Mesh(TileAssignment device_assignment,
                 absl::Span<const std::string> axes_names)
       : device_assignment_(std::move(device_assignment)),
@@ -67,6 +76,14 @@ class Mesh {
         << "Number of axes names must match number of dimensions in the "
            "device assignment.";
   }
+
+  const TileAssignment& device_assignment() const { return device_assignment_; }
+
+  // Returns whether this mesh is a maximal-sharding mesh.
+  //
+  // A maximal-sharding mesh is a mesh with an empty axis list and a single
+  // device id.
+  bool IsMaximal() const;
 
   bool operator==(const Mesh& other) const {
     return device_assignment_ == other.device_assignment_ &&
@@ -82,8 +99,6 @@ class Mesh {
   MeshProto ToProto() const;
 
   static Mesh FromProto(const MeshProto& proto);
-
-  TileAssignment device_assignment() const { return device_assignment_; }
 
  private:
   // Dimensions of the `device_assignment_` array correspond to the axes of the
