@@ -70,10 +70,6 @@ absl::Status UpdateCuptiTracerOptionsFromProfilerOptions(
                         }));
 
   TF_RETURN_IF_ERROR(SetValue<bool>(
-      profile_options, "gpu_dump_graph_node_mapping", input_keys,
-      [&](bool value) { collector_options.dump_graph_nope_mapping = value; }));
-
-  TF_RETURN_IF_ERROR(SetValue<bool>(
       profile_options, "gpu_enable_nvtx_tracking", input_keys,
       [&](bool value) { tracer_options.enable_nvtx_tracking = value; }));
 
