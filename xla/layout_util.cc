@@ -632,4 +632,33 @@ Layout LayoutUtil::MoveDimToMinor(const Layout& layout, const int64_t dim) {
              : std::nullopt;
 }
 
+/*static*/ bool LayoutUtil::IsUntiledLayout(absl::Span<const Tile> tiles,
+                                            absl::Span<const int64_t> shape) {
+  std::vector<int64_t> current_shape(shape.begin(), shape.end());
+  for (const xla::Tile& tile : tiles) {
+    const int64_t tile_ndims = tile.dimensions().size();
+    const absl::Span<const int64_t> tiled_shape =
+        absl::Span<const int64_t>(current_shape).last(tile_ndims);
+    std::vector<int64_t> new_tiled_shape(2 * tile_ndims);
+    bool allow_multiple_tiles = true;
+    for (int64_t i = 0; i < tile_ndims; ++i) {
+      if (tiled_shape[i] % tile.dimension(i) != 0) {
+        return false;
+      }
+      new_tiled_shape[i] = tiled_shape[i] / tile.dimension(i);
+      new_tiled_shape[tile_ndims + i] = tile.dimension(i);
+      if (!allow_multiple_tiles && new_tiled_shape[i] != 1) {
+        return false;
+      }
+      if (tile.dimension(i) != 1) {
+        allow_multiple_tiles = false;
+      }
+    }
+    current_shape.erase(current_shape.end() - tile_ndims, current_shape.end());
+    current_shape.insert(current_shape.end(), new_tiled_shape.begin(),
+                         new_tiled_shape.end());
+  }
+  return true;
+}
+
 }  // namespace xla
