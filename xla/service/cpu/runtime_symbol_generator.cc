@@ -38,13 +38,11 @@ limitations under the License.
 #include "mlir/ExecutionEngine/CRunnerUtils.h"
 #include "xla/service/cpu/cpu_runtime.h"
 #include "xla/service/cpu/runtime_conv2d.h"
-#include "xla/service/cpu/runtime_conv2d_acl.h"
 #include "xla/service/cpu/runtime_conv3d.h"
 #include "xla/service/cpu/runtime_custom_call_status.h"
 #include "xla/service/cpu/runtime_fp16.h"
 #include "xla/service/cpu/runtime_key_value_sort.h"
 #include "xla/service/cpu/runtime_matmul.h"
-#include "xla/service/cpu/runtime_matmul_acl.h"
 #include "xla/service/cpu/runtime_pow.h"
 #include "xla/service/cpu/runtime_single_threaded_conv2d.h"
 #include "xla/service/cpu/runtime_single_threaded_conv3d.h"
@@ -166,9 +164,6 @@ static bool RegisterKnownJITSymbols() {
   REGISTER_CPU_RUNTIME_SYMBOL(EigenMatMulC128);
   REGISTER_CPU_RUNTIME_SYMBOL(EigenMatMulS32);
   REGISTER_CPU_RUNTIME_SYMBOL(EigenBatchMatMulF32);
-  REGISTER_CPU_RUNTIME_SYMBOL(ACLMatMulF32);
-  REGISTER_CPU_RUNTIME_SYMBOL(ACLBatchMatMulF32);
-  REGISTER_CPU_RUNTIME_SYMBOL(ACLConv2DF32);
   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedConv2DF16);
   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedConv2DF32);
   REGISTER_CPU_RUNTIME_SYMBOL(EigenSingleThreadedConv3DF16);
