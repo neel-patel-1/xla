@@ -184,6 +184,31 @@ using ::xla::gpu::triton::TritonType;
 
 namespace {
 
+using TensorValue = mlir::TypedValue<mlir::RankedTensorType>;
+// Create either a non-0D tensor or a scalar.
+// If the passed value is a tensor with rank 0, it is wrapped in a ToScalarOp
+// to extract the scalar and in all other cases, the value is returned as is.
+ScalarOrTensor MakeScalarOrTensor(EmitterLocOpBuilder& b, mlir::Value value) {
+  if (auto tensor_value = mlir::dyn_cast<TensorValue>(value);
+      tensor_value && tensor_value.getType().getRank() == 0) {
+    // Triton does not support 0-D tensors so we must extract the scalar value.
+    // TODO(csigg): This should be handled in the extract/insert rewrite.
+    return ScalarOrTensor(b.createOrFold<xtile::ToScalarOp>(tensor_value));
+  }
+
+  return ScalarOrTensor(value);
+}
+
+// Create a tensor from the passed value.
+// If the passed value is a scalar, it is wrapped in a ToTensorOp to create a
+// 0D-Tensor else it is returned as is.
+TensorValue MakeTensor(EmitterLocOpBuilder& b, mlir::Value value) {
+  if (auto tensor = mlir::dyn_cast<TensorValue>(value)) {
+    return tensor;
+  }
+  return mlir::cast<TensorValue>(b.createOrFold<xtile::ToTensorOp>(value));
+}
+
 Value MakeIndex(EmitterLocOpBuilder& b, int64_t value) {
   return b.create<arith::ConstantIndexOp>(value);
 }
@@ -304,8 +329,6 @@ absl::StatusOr<TileInfo> TileInfo::Construct(
                   minor_to_major_layout, storage_type);
 }
 
-using TensorValue = mlir::TypedValue<mlir::RankedTensorType>;
-
 // Same as HLO BroadcastInDims. The sorted indices in `dims` specify the mapping
 // of the input dimensions to the output dimensions.
 ScalarOrTensor BroadcastInDims(EmitterLocOpBuilder b, ScalarOrTensor value,
@@ -317,12 +340,7 @@ ScalarOrTensor BroadcastInDims(EmitterLocOpBuilder b, ScalarOrTensor value,
 
   if (value.IsScalar()) {
     CHECK(dims.empty()) << "scalar broadcast must have empty dims";
-    auto scalar_tensor_type =
-        mlir::RankedTensorType::get(/*shape=*/{}, value.getType());
-
-    broadcast_in_dim_input = b.create<mlir::tensor::FromElementsOp>(
-                                  scalar_tensor_type, value.UnwrapScalar())
-                                 .getResult();
+    broadcast_in_dim_input = MakeTensor(b, value.UnwrapScalar());
   } else {
     broadcast_in_dim_input = value.UnwrapTensor();
   }
@@ -354,13 +372,7 @@ ScalarOrTensor EmitParameterExtract(EmitterLocOpBuilder b,
       tensor_type, arg, tile_info.offsets(), tile_info.padded_tile_sizes(),
       tile_info.tile_strides());
 
-  if (tensor_type.getRank() == 0) {
-    // Triton does not support 0-D tensors so we must extract the scalar value.
-    // TODO(csigg): This should be handled in the extract/insert rewrite.
-    return ScalarOrTensor(b.create<mlir::tensor::ExtractOp>(extracted_tensor));
-  }
-
-  return ScalarOrTensor(extracted_tensor);
+  return MakeScalarOrTensor(b, extracted_tensor);
 }
 
 absl::StatusOr<ScalarOrTensor> EmitScope(
@@ -413,10 +425,8 @@ absl::StatusOr<ScalarOrTensor> EmitReduce(
                                                      neutral.UnwrapUnsafe()));
   }
 
-  Value init_value = b.create<mlir::tensor::FromElementsOp>(
-      mlir::RankedTensorType::get(
-          /*shape=*/{}, values[tiled_hlo_reduce.operand(1)].getType()),
-      values[tiled_hlo_reduce.operand(1)].UnwrapScalar());
+  Value init_value =
+      MakeTensor(b, values[tiled_hlo_reduce.operand(1)].UnwrapScalar());
 
   stablehlo::ReduceOp reduction = b.create<stablehlo::ReduceOp>(
       input.UnwrapTensor(), init_value, reduction_dimension);
@@ -446,12 +456,9 @@ absl::StatusOr<ScalarOrTensor> EmitReduce(
           return Internal("Expected reducer argument to be a tensor.");
         }
 
-        // Emit extract op so that the reducer can be lowered to triton, as the
-        // triton reducer can only work with scalars.
-        auto extracted_argument =
-            ScalarOrTensor(b.create<mlir::tensor::ExtractOp>(
-                                argument.getType().getElementType(), argument)
-                               .getResult());
+        // Emit from tensor op so that the reducer can be lowered to triton, as
+        // the triton reducer can only work with scalars.
+        auto extracted_argument = MakeScalarOrTensor(b, argument);
         TF_RET_CHECK(region_values.insert({instr, extracted_argument}).second);
       } else {
         to_emit.push_back(instr);
@@ -465,19 +472,12 @@ absl::StatusOr<ScalarOrTensor> EmitReduce(
                                   region_values));
     // Emit from_elements op so that the reducer can be lowered to triton, as
     // the triton reducer can only work with scalars.
-    auto result_as_scalar = b.create<mlir::tensor::FromElementsOp>(
-        result_ty, result.UnwrapUnsafe());
+    auto result_as_scalar = MakeTensor(b, result.UnwrapUnsafe());
     b.create<stablehlo::ReturnOp>(SmallVector<Value>({result_as_scalar}));
     b.setInsertionPointAfter(reduction);
   }
 
-  auto result = reduction.getResult(0);
-  if (mlir::cast<ShapedType>(result.getType()).getRank() == 0) {
-    result = b.create<mlir::tensor::ExtractOp>(
-        mlir::cast<ShapedType>(result.getType()).getElementType(), result);
-  }
-
-  return ScalarOrTensor(result);
+  return MakeScalarOrTensor(b, reduction.getResult(0));
 }
 
 // Emit code corresponding to a fusion instruction somehow nested within the
@@ -602,56 +602,24 @@ SmallVector<Value> GetRuntimeValues(
   return runtime_values;
 }
 
-// Reshapes a non-0D tensor of shape [1, 1, 1, ...] to a scalar.
-ScalarOrTensor ReshapeTensorToScalar(EmitterLocOpBuilder b, Value input) {
-  auto element_type = mlir::cast<ShapedType>(input.getType()).getElementType();
-  auto shaped_type = mlir::cast<ShapedType>(input.getType());
-
-  SmallVector<Value> zero_indices;
-  zero_indices.assign(shaped_type.getRank(),
-                      b.create<mlir::arith::ConstantIndexOp>(0));
-
-  return ScalarOrTensor(
-      b.create<mlir::tensor::ExtractOp>(element_type, input, zero_indices));
-}
-
-absl::StatusOr<ScalarOrTensor> EmitTiledReshape(EmitterLocOpBuilder b,
-                                                ArrayRef<int64_t> tile_sizes,
-                                                ScalarOrTensor input) {
+absl::StatusOr<TensorValue> EmitTiledReshape(EmitterLocOpBuilder b,
+                                             ArrayRef<int64_t> tile_sizes,
+                                             TensorValue input) {
+  mlir::RankedTensorType input_type = input.getType();
   SmallVector<int64_t> padded_tile_sizes = GetPaddedTileSizes(tile_sizes);
-
-  if (input.IsScalar()) {
-    if (tile_sizes.empty()) {
-      // Nothing to do.
-      return input;
-    }
-    // Convert the scalar to a tensor.
-    return Splat(b, input, padded_tile_sizes);
-  }
-
-  // At this point we know that the input is a non-0D tensor.
-  auto input_shaped_type = mlir::cast<ShapedType>(input.getType());
-
-  // Handle the case of reshaping [1,1,1...] to a scalar.
-  if (tile_sizes.empty()) {
-    return ReshapeTensorToScalar(b, input.UnwrapTensor());
-  }
 
   // At this point we know that neither the input nor the output are 0D tensors.
   auto output_tensor_type = mlir::RankedTensorType::get(
-      padded_tile_sizes, input_shaped_type.getElementType());
+      padded_tile_sizes, input_type.getElementType());
 
-  if (input_shaped_type.getNumElements() !=
-      output_tensor_type.getNumElements()) {
+  if (input_type.getNumElements() != output_tensor_type.getNumElements()) {
     return absl::InvalidArgumentError(
         absl::StrCat("Reshape input and output shapes must be the same, got ",
-                     absl::StrJoin(input_shaped_type.getShape(), "x"), " -> ",
+                     absl::StrJoin(input_type.getShape(), "x"), " -> ",
                      absl::StrJoin(output_tensor_type.getShape(), "x")));
   }
 
-  auto reshape =
-      b.create<stablehlo::ReshapeOp>(output_tensor_type, input.UnwrapUnsafe());
-  return ScalarOrTensor(reshape.getResult());
+  return b.create<stablehlo::ReshapeOp>(output_tensor_type, input);
 }
 
 Value EmitTiledTranspose(EmitterLocOpBuilder b, ArrayRef<int64_t> tile_sizes,
@@ -730,20 +698,19 @@ absl::StatusOr<ScalarOrTensor> EmitTiledBitcast(
   if (ShapeUtil::Equal(trt->transpose1_shape, trt->reshape_shape)) {
     normalized_reshape = normalized_input;
   } else {
-    TF_ASSIGN_OR_RETURN(auto reshape,
+    TF_ASSIGN_OR_RETURN(normalized_reshape,
                         EmitTiledReshape(b, reshape_tile_sizes,
-                                         ScalarOrTensor(normalized_input)));
-    normalized_reshape = reshape.UnwrapUnsafe();
+                                         MakeTensor(b, normalized_input)));
   }
 
   // The final transpose simply uses the tile sizes computed for the original
   // bitcast by the tiling analysis.
-  return ScalarOrTensor{
-      trt->IsTranspose2Identity()
-          ? normalized_reshape
-          : EmitTiledTranspose(b, tiled_bitcast.tile_sizes(),
-                               llvm::to_vector(trt->transpose2_dims),
-                               normalized_reshape)};
+  return MakeScalarOrTensor(
+      b, trt->IsTranspose2Identity()
+             ? normalized_reshape
+             : EmitTiledTranspose(b, tiled_bitcast.tile_sizes(),
+                                  llvm::to_vector(trt->transpose2_dims),
+                                  normalized_reshape));
 }
 
 absl::StatusOr<std::vector<ScalarOrTensor>> EmitTiledComputation(
@@ -913,10 +880,8 @@ absl::StatusOr<Value> CanonicalizeDotOperand(
   }
 
   if (shape.size() != shape_without_unit_dims.size()) {
-    TF_ASSIGN_OR_RETURN(
-        ScalarOrTensor wrapped_operand,
-        EmitTiledReshape(b, shape_without_unit_dims, ScalarOrTensor(operand)));
-    operand = wrapped_operand.UnwrapTensor();
+    TF_ASSIGN_OR_RETURN(operand, EmitTiledReshape(b, shape_without_unit_dims,
+                                                  MakeTensor(b, operand)));
   }
 
   int expected_contracting_dim_position = side == DotOperandSide::kLhs ? 1 : 0;
@@ -1094,12 +1059,10 @@ absl::StatusOr<ScalarOrTensor> EmitDot(
 
   if (padded_tile_sizes.size() != padded_tile_sizes_no_unit_dims.size()) {
     TF_ASSIGN_OR_RETURN(
-        ScalarOrTensor wrapped_result,
-        EmitTiledReshape(b, padded_tile_sizes, ScalarOrTensor(result)));
-    result = wrapped_result.UnwrapTensor();
+        result, EmitTiledReshape(b, padded_tile_sizes, MakeTensor(b, result)));
   }
 
-  return ScalarOrTensor(result);
+  return MakeScalarOrTensor(b, result);
 }
 
 absl::StatusOr<ScalarOrTensor> EmitScaledDot(
@@ -1248,12 +1211,10 @@ absl::StatusOr<ScalarOrTensor> EmitScaledDot(
 
   if (padded_tile_sizes.size() != padded_tile_sizes_no_unit_dims.size()) {
     TF_ASSIGN_OR_RETURN(
-        ScalarOrTensor wrapped_result,
-        EmitTiledReshape(b, padded_tile_sizes, ScalarOrTensor(result)));
-    result = wrapped_result.UnwrapTensor();
+        result, EmitTiledReshape(b, padded_tile_sizes, MakeTensor(b, result)));
   }
 
-  return ScalarOrTensor(result);
+  return MakeScalarOrTensor(b, result);
 }
 
 absl::StatusOr<ScalarOrTensor> EmitConcatenate(
@@ -1526,16 +1487,20 @@ absl::StatusOr<ScalarOrTensor> EmitTiledHloInstruction(
     operands.reserve(hlo->operands().size());
 
     for (const TiledHloInstruction* operand : tiled_hlo.operands()) {
-      operands.push_back(values[operand].UnwrapUnsafe());
+      operands.push_back(MakeTensor(b, values[operand].UnwrapUnsafe()));
     }
     TF_ASSIGN_OR_RETURN(Value result,
                         EmitElementwise(b, device_info, *hlo, operands));
-    return ScalarOrTensor(result);
+    return MakeScalarOrTensor(b, result);
   }
 
   if (hlo->opcode() == HloOpcode::kReshape) {
-    return EmitTiledReshape(b, tiled_hlo.tile_sizes(),
-                            values[tiled_hlo.operand(0)]);
+    TF_ASSIGN_OR_RETURN(
+        TensorValue reshaped_value,
+        EmitTiledReshape(
+            b, tiled_hlo.tile_sizes(),
+            MakeTensor(b, values[tiled_hlo.operand(0)].UnwrapUnsafe())));
+    return MakeScalarOrTensor(b, reshaped_value);
   }
 
   if (hlo->opcode() == HloOpcode::kBitcast) {
@@ -1645,11 +1610,11 @@ absl::StatusOr<ScalarOrTensor> EmitScope(
       std::vector<Value> operands;
       operands.reserve(hlo->operands().size());
       for (const HloInstruction* operand : hlo->operands()) {
-        operands.push_back(values[operand].UnwrapUnsafe());
+        operands.push_back(MakeTensor(b, values[operand].UnwrapUnsafe()));
       }
       TF_ASSIGN_OR_RETURN(Value elementwise_result,
                           EmitElementwise(b, device_info, *hlo, operands));
-      result = ScalarOrTensor(elementwise_result);
+      result = MakeScalarOrTensor(b, elementwise_result);
     } else if (hlo->opcode() == HloOpcode::kTuple) {
       TF_RET_CHECK(hlo->IsRoot()) << hlo->ToString();
     } else if (hlo->opcode() == HloOpcode::kBitcast ||
@@ -1852,17 +1817,8 @@ absl::Status EmitGeneric(mlir::OpBuilder builder,
           ScalarOrTensor(Cast(b, result.UnwrapUnsafe(), result_storage_type));
     }
 
-    mlir::Value input_tensor;
-    if (result.IsScalar()) {
-      // TODO(csigg): Handle this in extract/insert rewrite.
-      mlir::Value scalar_value = result.UnwrapScalar();
-      auto tensor_type =
-          mlir::RankedTensorType::get({}, scalar_value.getType());
-      input_tensor =
-          b.create<mlir::tensor::FromElementsOp>(tensor_type, scalar_value);
-    } else {
-      input_tensor = result.UnwrapTensor();
-    }
+    // TODO(csigg): Handle this in extract/insert rewrite.
+    mlir::Value input_tensor = MakeTensor(b, result.UnwrapUnsafe());
 
     TF_ASSIGN_OR_RETURN(
         auto tile_info,
@@ -2325,11 +2281,22 @@ absl::Status LowerXTileToTriton(mlir::ModuleOp xtile_dialect_module,
                                 mlir::MLIRContext& mlir_context,
                                 const HloFusionInstruction& fusion,
                                 const se::DeviceDescription& device_info) {
-  {  // Convert xTile ops to Triton ops.
+  {
+    auto backend_config =
+        fusion.backend_config<GpuBackendConfig>()->fusion_backend_config();
+    absl::string_view fusion_kind = backend_config.kind();
+
+    // Convert xTile ops to Triton ops.
     mlir::PassManager pm(&mlir_context);
     // Disable verifier because the Triton code may be invalid due to the
     // unsupported types.
     pm.enableVerifier(/*enabled=*/false);
+    // The legacy emitter supports 0D tensors so we would get inconsistent
+    // results if we try to rewrite them.
+    if (fusion_kind != kTritonGemmFusionKind) {
+      pm.addPass(
+          mlir::triton::xla::CreateTritonXLAConvert0DTensorToScalarPass());
+    }
     pm.addPass(mlir::triton::xla::CreateTensorLowerToTritonPass());
     pm.addPass(mlir::triton::xla::CreateStableHLOLowerToTritonPass());
 

@@ -211,8 +211,9 @@ def StableHLOLowerToTritonPass
     : Pass<"stablehlo-lower-to-triton", "mlir::ModuleOp"> {
   let summary = "Lowers StableHLO operations to their Triton equivalent.";
   let dependentDialects = [
-    "stablehlo::StablehloDialect",
-    "triton::TritonDialect"
+    "::mlir::stablehlo::StablehloDialect",
+    "::mlir::triton::TritonDialect",
+    "::xla::xtile::XTileDialect",
   ];
   let constructor = "CreateStableHLOLowerToTritonPass()";
 }
@@ -239,6 +240,14 @@ def TritonXLAMathToLibdevicePass
            "Path to the libdevice library.">,
     Option<"triple_string_", "triple", "std::string", "",
            "Device triple string.">,
+  ];
+}
+
+def TritonXLAConvert0DTensorToScalarPass
+    : Pass<"triton-xla-convert-0d-tensor-to-scalar", "mlir::ModuleOp"> {
+  let summary = "Lowers 0D tensors to scalars.";
+  let dependentDialects = [
+    "::xla::xtile::XTileDialect",
   ];
 }
 
