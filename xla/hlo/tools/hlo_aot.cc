@@ -5,6 +5,7 @@
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/service/compile_only_service.h"
 #include "xla/service/cpu/cpu_aot_compilation_result.h"
+#include "xla/service/compiler.h"
 #include "xla/stream_executor/platform_manager.h"  // Added for PlatformManager
 
 int main(int argc, char** argv) {
@@ -37,7 +38,8 @@ int main(int argc, char** argv) {
   auto platform = stream_executor::PlatformManager::PlatformWithName("CPU").value();
   auto service = xla::CompileOnlyService::NewService(platform).value();
 
-  auto results = service->CompileAheadOfTime({instance}, aot_opts).value();
+  std::unique_ptr<xla::AotCompilationMetadata> metadata;
+  auto results = service->CompileAheadOfTime({instance}, aot_opts, &metadata).value();
 
   // 5) Extract object bytes and write .o
   auto* cpu_res =
