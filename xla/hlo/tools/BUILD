@@ -158,6 +158,17 @@ xla_cc_binary(
     ],
 )
 
+cc_binary(
+    name = "hlo_aot",
+    srcs = ["hlo_aot.cc"],
+    deps = [
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/service:service",
+        "//xla/service/cpu:cpu_compiler",
+        "//xla/service/cpu:cpu_runtime",
+    ],
+)
+
 py_strict_library(
     name = "generate_hlo_test_checks_lib",
     srcs = ["generate_hlo_test_checks.py"],

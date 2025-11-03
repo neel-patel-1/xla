@@ -1,0 +1,51 @@
+// hlo_aot.cc
+#include <fstream>
+#include "xla/hlo/parser/hlo_parser.h"
+#include "xla/service/compile_only_service.h"
+#include "xla/service/cpu/cpu_compiler.h"
+#include "xla/service/cpu/cpu_aot_compilation_result.h"
+
+int main(int argc, char** argv) {
+  const std::string in_hlo = argv[1];
+  const std::string out_o  = argv[2];
+  const std::string triple = argv[3];     // e.g. "x86_64-pc-linux-gnu"
+  const std::string cpu    = argv[4];     // e.g. "skylake-avx512"
+  const std::string features = argv[5];   // e.g. "+avx512f,+avx512dq"
+
+  // 1) Parse HLO
+  auto mod = xla::ParseAndReturnUnverifiedModule(
+      *xla::GetDebugOptionsFromFlags(), in_hlo).value(); // or read file then parse
+
+  // 2) Describe argument/result layouts for AOT
+  xla::AotComputationInstance instance;
+  instance.computation = mod.get();
+  std::vector<xla::Shape> arg_layouts;
+  for (int i = 0; i < mod->entry_computation_layout().parameter_count(); ++i)
+    arg_layouts.push_back(mod->entry_computation_layout().parameter_shape(i));
+  instance.argument_layouts = absl::MakeSpan(arg_layouts);
+  xla::Shape result_layout = mod->result_shape();
+  instance.result_layout = &result_layout;
+
+  // 3) Build AOT options for CPU (triple/CPU/features)
+  xla::AotCompilationOptions aot_opts;
+  xla::cpu::CpuAotCompilationOptions cpu_opts;
+  cpu_opts.set_triple(triple);
+  cpu_opts.set_cpu_name(cpu);
+  cpu_opts.set_features(features);
+  aot_opts.set_platform_name("CPU");
+  aot_opts.set_cpu_compilation_options(cpu_opts);
+
+  // 4) Create a compile-only service for CPU and AOT-compile
+  xla::CompileOnlyServiceOptions svc_opts;
+  svc_opts.set_platform(
+      se::PlatformManager::PlatformWithName("CPU").value());
+  auto service = xla::CompileOnlyService::NewService(svc_opts).value();
+
+  auto results = service->CompileAheadOfTime({instance}, aot_opts).value();
+
+  // 5) Extract object bytes and write .o
+  auto* cpu_res =
+      static_cast<xla::cpu::CpuAotCompilationResult*>(results[0].get());
+  absl::string_view obj = cpu_res->object_file_data().data();
+  std::ofstream(out_o, std::ios::binary).write(obj.data(), obj.size());
+}
