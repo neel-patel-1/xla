@@ -14,6 +14,8 @@ int main(int argc, char** argv) {
   const std::string cpu    = argv[4];     // e.g. "skylake-avx512"
   const std::string features = argv[5];   // e.g. "+avx512f,+avx512dq"
 
+  using RM = xla::cpu::CpuAotCompilationOptions::RelocationModel;
+
   // 1) Parse HLO
   auto mod = xla::ParseAndReturnUnverifiedModule(in_hlo).value(); // or read file then parse
 
@@ -28,7 +30,7 @@ int main(int argc, char** argv) {
   instance.result_layout = mod->result_shape();
 
   // 3) Build AOT options for CPU (triple/CPU/features)
-  xla::cpu::CpuAotCompilationOptions cpu_opts(triple, cpu, features, "entry", llvm::Reloc::Model::PIC);
+  xla::cpu::CpuAotCompilationOptions cpu_opts(triple, cpu, features, "entry", RM::Static);
   xla::AotCompilationOptions& aot_opts = cpu_opts;
 
   // 4) Create a compile-only service for CPU and AOT-compile
