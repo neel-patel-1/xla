@@ -1,9 +1,11 @@
 // hlo_aot.cc
 #include <fstream>
+#include "absl/strings/string_view.h"
+#include "llvm/Support/CodeGen.h"  // For Reloc
 #include "xla/hlo/parser/hlo_parser.h"
 #include "xla/service/compile_only_service.h"
-#include "xla/service/cpu/cpu_compiler.h"
 #include "xla/service/cpu/cpu_aot_compilation_result.h"
+#include "xla/stream_executor/platform_manager.h"  // Added for PlatformManager
 
 int main(int argc, char** argv) {
   const std::string in_hlo = argv[1];
@@ -13,33 +15,25 @@ int main(int argc, char** argv) {
   const std::string features = argv[5];   // e.g. "+avx512f,+avx512dq"
 
   // 1) Parse HLO
-  auto mod = xla::ParseAndReturnUnverifiedModule(
-      *xla::GetDebugOptionsFromFlags(), in_hlo).value(); // or read file then parse
+  auto mod = xla::ParseAndReturnUnverifiedModule(in_hlo).value(); // or read file then parse
 
   // 2) Describe argument/result layouts for AOT
-  xla::AotComputationInstance instance;
-  instance.computation = mod.get();
-  std::vector<xla::Shape> arg_layouts;
-  for (int i = 0; i < mod->entry_computation_layout().parameter_count(); ++i)
-    arg_layouts.push_back(mod->entry_computation_layout().parameter_shape(i));
-  instance.argument_layouts = absl::MakeSpan(arg_layouts);
-  xla::Shape result_layout = mod->result_shape();
-  instance.result_layout = &result_layout;
+  xla::CompileOnlyService::AotXlaComputationInstance instance;
+  instance.computation = mod->ToProto();
+  std::vector<const xla::Shape*> arg_layouts;
+  for (int i = 0; i < mod->entry_computation_layout().parameter_count(); ++i) {
+    arg_layouts.push_back(&mod->entry_computation_layout().parameter_shape(i));
+  }
+  instance.argument_layouts = std::move(arg_layouts);
+  instance.result_layout = mod->result_shape();
 
   // 3) Build AOT options for CPU (triple/CPU/features)
-  xla::AotCompilationOptions aot_opts;
-  xla::cpu::CpuAotCompilationOptions cpu_opts;
-  cpu_opts.set_triple(triple);
-  cpu_opts.set_cpu_name(cpu);
-  cpu_opts.set_features(features);
-  aot_opts.set_platform_name("CPU");
-  aot_opts.set_cpu_compilation_options(cpu_opts);
+  xla::cpu::CpuAotCompilationOptions cpu_opts(triple, cpu, features, "entry", llvm::Reloc::Model::PIC);
+  xla::AotCompilationOptions& aot_opts = cpu_opts;
 
   // 4) Create a compile-only service for CPU and AOT-compile
-  xla::CompileOnlyServiceOptions svc_opts;
-  svc_opts.set_platform(
-      se::PlatformManager::PlatformWithName("CPU").value());
-  auto service = xla::CompileOnlyService::NewService(svc_opts).value();
+  auto platform = stream_executor::PlatformManager::PlatformWithName("CPU").value();
+  auto service = xla::CompileOnlyService::NewService(platform).value();
 
   auto results = service->CompileAheadOfTime({instance}, aot_opts).value();
 
