@@ -19,6 +19,7 @@ limitations under the License.
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/strings/string_view.h"
 #include "absl/types/span.h"
@@ -27,6 +28,7 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api.h"
 #include "xla/pjrt/c/pjrt_c_api_helpers.h"
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_common.h"
 #include "xla/shape.h"
 
 #ifndef XLA_PJRT_C_PJRT_C_API_TEST_BASE_H_
@@ -42,7 +44,9 @@ absl::Span<const char> GetRawView(const std::vector<T>& v) {
 
 class PjrtCApiTestBase : public ::testing::Test {
  public:
-  explicit PjrtCApiTestBase(const PJRT_Api* api);
+  explicit PjrtCApiTestBase(
+      const PJRT_Api* api,
+      absl::flat_hash_map<std::string, xla::PjRtValueType> create_options = {});
   ~PjrtCApiTestBase() override;
 
  protected:

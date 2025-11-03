@@ -401,9 +401,6 @@ class PjRtCApiClient : public PjRtClient {
     return nullptr;
   }
 
-  using CrossHostRecvNotifierFunction =
-      std::function<void(PJRT_Error*, const char**, size_t*, size_t)>;
-
   template <typename ExtType>
   ExtType* FindExtension(PJRT_Extension_Type type) const {
     return reinterpret_cast<ExtType*>(FindExtensionImpl(type));  // NOLINT

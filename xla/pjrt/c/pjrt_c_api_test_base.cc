@@ -22,6 +22,7 @@ limitations under the License.
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "absl/container/flat_hash_map.h"
 #include "absl/log/check.h"
 #include "absl/log/log.h"
 #include "absl/types/span.h"
@@ -33,6 +34,7 @@ limitations under the License.
 #include "xla/pjrt/c/pjrt_c_api_helpers.h"
 #include "xla/pjrt/c/pjrt_c_api_wrapper_impl.h"  // IWYU pragma: keep
 #include "xla/pjrt/pjrt_client.h"
+#include "xla/pjrt/pjrt_common.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/proto/compile_options.pb.h"
 #include "xla/service/computation_placer.h"
@@ -44,12 +46,23 @@ limitations under the License.
 namespace pjrt {
 namespace {
 
-PJRT_Client* CreateClient(const PJRT_Api* api) {
+PJRT_Client* CreateClient(
+    const PJRT_Api* api,
+    const absl::flat_hash_map<std::string, xla::PjRtValueType>&
+        create_options) {
   PJRT_Client_Create_Args create_args;
   create_args.struct_size = PJRT_Client_Create_Args_STRUCT_SIZE;
   create_args.extension_start = nullptr;
-  create_args.create_options = nullptr;
-  create_args.num_options = 0;
+  absl::StatusOr<std::vector<PJRT_NamedValue>> c_options;
+  if (!create_options.empty()) {
+    c_options = ConvertToPjRtNamedValueList(create_options);
+    CHECK_OK(c_options);
+    create_args.create_options = c_options->data();
+    create_args.num_options = c_options->size();
+  } else {
+    create_args.create_options = nullptr;
+    create_args.num_options = 0;
+  }
   create_args.kv_get_callback = nullptr;
   create_args.kv_get_user_arg = nullptr;
   create_args.kv_put_callback = nullptr;
@@ -64,9 +77,11 @@ PJRT_Client* CreateClient(const PJRT_Api* api) {
 
 }  // namespace
 
-PjrtCApiTestBase::PjrtCApiTestBase(const PJRT_Api* api) {
+PjrtCApiTestBase::PjrtCApiTestBase(
+    const PJRT_Api* api,
+    absl::flat_hash_map<std::string, xla::PjRtValueType> create_options) {
   api_ = api;
-  client_ = CreateClient(api_);
+  client_ = CreateClient(api_, create_options);
 }
 
 PjrtCApiTestBase::~PjrtCApiTestBase() { destroy_client(client_); }
