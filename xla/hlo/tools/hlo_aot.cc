@@ -44,6 +44,7 @@ int main(int argc, char** argv) {
   // 5) Extract object bytes and write .o
   auto* cpu_res =
       static_cast<xla::cpu::CpuAotCompilationResult*>(results[0].get());
-  absl::string_view obj = cpu_res->object_file_data().data();
-  std::ofstream(out_o, std::ios::binary).write(obj.data(), obj.size());
+  absl::string_view *obj = cpu_res->obj_files().data();
+  std::ofstream(out_o, std::ios::binary).write(obj->data(), obj->size());
+  // std::ofstream(out_o, std::ios::binary).write(obj.data(), obj.size());
 }
