@@ -1,3 +1,4 @@
+
 /* Copyright 2023 The OpenXLA Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +19,9 @@ limitations under the License.
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
+#include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
@@ -27,16 +30,24 @@ limitations under the License.
 #include "llvm/IR/Metadata.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
+#include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
 #include "mlir/IR/Value.h"
+#include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/PassManager.h"
 #include "xla/autotuning.pb.h"
+#include "xla/backends/gpu/codegen/triton/emitter_helpers.h"
+#include "xla/backends/gpu/codegen/triton/support.h"
 #include "xla/codegen/emitter_loc_op_builder.h"
 #include "xla/codegen/tiling/symbolic_tile_analysis.h"
+#include "xla/codegen/tiling/tiled_hlo_computation.h"
+#include "xla/codegen/tiling/tiled_hlo_instruction.h"
+#include "xla/codegen/xtile/ir/xtile_ops.h"
 #include "xla/hlo/analysis/symbolic_expr.h"
 #include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/hlo/ir/hlo_instructions.h"
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/service/gpu/model/block_level_parameters.h"
@@ -44,6 +55,7 @@ limitations under the License.
 #include "xla/stream_executor/device_description.h"
 #include "xla/stream_executor/gpu/tma_metadata.h"
 #include "xla/stream_executor/launch_dim.h"
+#include "xla/util.h"
 
 namespace mlir {
 namespace triton {
@@ -103,6 +115,97 @@ absl::StatusOr<TritonWrapperResult> CompileTritonToLLVM(
 std::string GetLibdevicePath(const HloModuleConfig& hlo_config,
                              const se::DeviceDescription& device_info);
 
+class FusionEmitter {
+ public:
+  virtual ~FusionEmitter() = default;
+
+  // This function (or its future equivalent) should emit the MLIR module in the
+  // shared dialect between XLA:CPU and XLA:GPU. At the moment it is still
+  // emitting GPU specific modules. It is currently exposed only for testing
+  // purposes and will only be used to make sure we are properly emitting the
+  // shared dialect.
+  absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> EmitXTileModule(
+      absl::string_view fn_name, const HloFusionInstruction* fusion,
+      const BlockLevelParameters& block_level_parameters,
+      SymbolicExprContext& symbolic_expr_context);
+
+ protected:
+  // Returns wheter or not the instruction is supported by the emitter.
+  virtual CodegenDecision IsSupportedInstruction(const HloInstruction& hlo) = 0;
+
+  virtual SymbolicTileAnalysisOrError GetSymbolicTileAnalysis(
+      const HloComputation* computation,
+      SymbolicExprContext* symbolic_expr_context) = 0;
+
+  // TODO(basioli): This function is a hack to allow us to use the legacy
+  // emitter in the Triton backend. This shouldn't be implemented by any other
+  // backend, and once the legacy emitter is migrated it should be removed.
+  virtual absl::Status EmitLegacyMatMul(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      xtile::EntryFuncOp fn,
+      const BlockLevelParameters& block_level_parameters) {
+    return Internal("Legacy emitter is not supported by this backend.");
+  }
+
+  // Generate XTile IR inside 'fn', using the given block_level_parameters.
+  // TODO(b/421837868): `BlockLevelParameters` should hold all the necessary
+  // tiling information.
+  absl::Status EmitGeneric(mlir::OpBuilder builder,
+                           const HloFusionInstruction* fusion,
+                           xtile::EntryFuncOp fn,
+                           const BlockLevelParameters& block_level_parameters,
+                           SymbolicExprContext* symbolic_expr_context);
+
+  // Emit a sequence of instructions using compatible tiling with producers
+  // ordered before consumers in `tiled_computation`. Returns the results for
+  // the roots of `tiled_computation`.
+  absl::StatusOr<std::vector<triton::ScalarOrTensor>> EmitTiledComputation(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      const TiledHloComputation& tiled_computation,
+      const BlockLevelParameters& block_level_parameters,
+      mlir::FunctionOpInterface fn, mlir::Value pid,
+      absl::flat_hash_map<const TiledHloInstruction*, triton::ScalarOrTensor>&
+          values);
+
+  absl::StatusOr<triton::ScalarOrTensor> EmitTiledHloInstruction(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      const TiledHloInstruction& tiled_hlo,
+      const BlockLevelParameters& block_level_parameters,
+      mlir::FunctionOpInterface fn, mlir::Value pid,
+      absl::flat_hash_map<const TiledHloInstruction*, triton::ScalarOrTensor>&
+          values);
+
+  absl::StatusOr<triton::ScalarOrTensor> EmitDot(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      const TiledHloInstruction& tiled_hlo_dot,
+      const BlockLevelParameters& block_level_parameters,
+      mlir::FunctionOpInterface fn, mlir::Value pid,
+      absl::flat_hash_map<const TiledHloInstruction*, triton::ScalarOrTensor>&
+          values);
+
+  absl::StatusOr<triton::ScalarOrTensor> EmitScaledDot(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      const TiledHloInstruction& tiled_hlo_dot,
+      const BlockLevelParameters& block_level_parameters,
+      mlir::FunctionOpInterface fn, mlir::Value pid,
+      absl::flat_hash_map<const TiledHloInstruction*, triton::ScalarOrTensor>&
+          values);
+
+  absl::StatusOr<triton::ScalarOrTensor> EmitConcatenate(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      const TiledHloInstruction& tiled_concatenate,
+      const BlockLevelParameters& block_level_parameters,
+      mlir::FunctionOpInterface fn, mlir::Value pid,
+      absl::flat_hash_map<const TiledHloInstruction*, triton::ScalarOrTensor>&
+          values);
+
+  absl::StatusOr<triton::ScalarOrTensor> EmitPad(
+      EmitterLocOpBuilder b, const TiledHloInstruction& tiled_pad,
+      absl::flat_hash_map<const TiledHloInstruction*, triton::ScalarOrTensor>&
+          values,
+      mlir::Value pid);
+};
+
 // TODO(b/406472229): Move the contents of this namespace to a helpers file
 // to avoid polluting `fusion_emitter.h`.
 // Exposed for testing and experimental purposes only. Do not use.
@@ -145,16 +248,26 @@ absl::StatusOr<Tiling> TilingFromAnnotatedFusion(
     const SymbolicTileAnalysis& symbolic_tile_analysis,
     const BlockLevelParameters& block_level_parameters);
 
-// This function (or its future equivalent) should emit the MLIR module in the
-// shared dialect between XLA:CPU and XLA:GPU. At the moment it is still
-// emitting GPU specific modules. It is currently exposed only for testing
-// purposes and will only be used to make sure we are properly emitting the
-// shared dialect.
-absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> EmitXTileModule(
-    absl::string_view fn_name, const HloFusionInstruction* fusion,
-    const se::DeviceDescription& device_info,
-    const BlockLevelParameters& block_level_parameters,
-    SymbolicExprContext& symbolic_expr_context);
+class TritonFusionEmitter : public FusionEmitter {
+ public:
+  explicit TritonFusionEmitter(const se::DeviceDescription& device_info)
+      : device_info_(device_info) {}
+
+ protected:
+  SymbolicTileAnalysisOrError GetSymbolicTileAnalysis(
+      const HloComputation* computation,
+      SymbolicExprContext* symbolic_expr_context) override;
+
+  CodegenDecision IsSupportedInstruction(const HloInstruction& hlo) override;
+
+  absl::Status EmitLegacyMatMul(
+      EmitterLocOpBuilder b, const HloFusionInstruction* fusion,
+      xtile::EntryFuncOp fn,
+      const BlockLevelParameters& block_level_parameters) override;
+
+ private:
+  const se::DeviceDescription& device_info_;
+};
 
 // This function lowers the shared dialect module to Triton. It is exposed for
 // testing with the same motivation as EmitXTileModule.

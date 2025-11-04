@@ -324,8 +324,7 @@ Value Compare(EmitterLocOpBuilder& b, ValueRange values,
       values[0], values[1]);
 }
 
-Value Maximum(EmitterLocOpBuilder& b, const se::DeviceDescription& device_info,
-              ValueRange values) {
+Value Maximum(EmitterLocOpBuilder& b, ValueRange values) {
   if (mlir::isa<mlir::FloatType>(mlir::getElementTypeOrSelf(values[0]))) {
     return b.create<ma::MaximumFOp>(values);
   }
@@ -345,8 +344,7 @@ Value Maximum(EmitterLocOpBuilder& b, const se::DeviceDescription& device_info,
       values[0], values[1]);
 }
 
-Value Minimum(EmitterLocOpBuilder& b, const se::DeviceDescription& device_info,
-              ValueRange values) {
+Value Minimum(EmitterLocOpBuilder& b, ValueRange values) {
   if (mlir::isa<mlir::FloatType>(mlir::getElementTypeOrSelf(values[0]))) {
     return b.create<ma::MinimumFOp>(values);
   }
@@ -421,7 +419,6 @@ absl::StatusOr<Value> EmitElementwiseLibdeviceFunction(
 }
 
 absl::StatusOr<Value> EmitElementwise(EmitterLocOpBuilder& b,
-                                      const se::DeviceDescription& device_info,
                                       const HloInstruction& hlo,
                                       ValueRange inputs) {
   const bool is_integer =
@@ -468,13 +465,11 @@ absl::StatusOr<Value> EmitElementwise(EmitterLocOpBuilder& b,
       }
       return b.create<ma::MulFOp>(inputs[0], inputs[1]);
     case HloOpcode::kMaximum:
-      return Maximum(b, device_info, inputs);
+      return Maximum(b, inputs);
     case HloOpcode::kMinimum:
-      return Minimum(b, device_info, inputs);
+      return Minimum(b, inputs);
     case HloOpcode::kClamp:
-      return Maximum(
-          b, device_info,
-          {Minimum(b, device_info, {inputs[1], inputs[2]}), inputs[0]});
+      return Maximum(b, {Minimum(b, {inputs[1], inputs[2]}), inputs[0]});
     case HloOpcode::kAnd:
       return b.create<ma::AndIOp>(inputs[0], inputs[1]);
     case HloOpcode::kOr:

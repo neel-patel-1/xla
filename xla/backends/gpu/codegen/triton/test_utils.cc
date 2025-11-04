@@ -165,11 +165,13 @@ absl::StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> CreateXTileIrAndFileCheck(
     absl::string_view filecheck_pattern) {
   auto* fusion = Cast<HloFusionInstruction>(computation.FusionInstruction());
 
-  TF_ASSIGN_OR_RETURN(
-      mlir::OwningOpRef<mlir::ModuleOp> xtile_dialect_module,
-      ir_emitter_triton_internal::EmitXTileModule(
-          "xtile_dialect_fn", fusion, TestGpuDeviceInfo::RTXA6000DeviceInfo(),
-          block_level_parameters, *test->symbolic_expr_context()));
+  ir_emitter_triton_internal::TritonFusionEmitter emitter(
+      TestGpuDeviceInfo::RTXA6000DeviceInfo());
+
+  TF_ASSIGN_OR_RETURN(mlir::OwningOpRef<mlir::ModuleOp> xtile_dialect_module,
+                      emitter.EmitXTileModule("xtile_dialect_fn", fusion,
+                                              block_level_parameters,
+                                              *test->symbolic_expr_context()));
 
   std::string out;
   llvm::raw_string_ostream os(out);
