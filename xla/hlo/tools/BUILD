@@ -163,6 +163,7 @@ cc_binary(
     srcs = ["hlo_aot.cc"],
     deps = [
         "//xla/hlo/parser:hlo_parser",
+        "//xla/stream_executor/host:host_platform",
         "//xla/service:service",
         "//xla/service/cpu:cpu_compiler",
         "//xla/service/cpu:cpu_runtime",

@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
   xla::AotCompilationOptions& aot_opts = cpu_opts;
 
   // 4) Create a compile-only service for CPU and AOT-compile
-  auto platform = stream_executor::PlatformManager::PlatformWithName("CPU").value();
+  auto platform = stream_executor::PlatformManager::PlatformWithName("Host").value();
   auto service = xla::CompileOnlyService::NewService(platform).value();
 
   std::unique_ptr<xla::AotCompilationMetadata> metadata;
