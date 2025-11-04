@@ -166,6 +166,7 @@ cc_binary(
         "//xla/service:service",
         "//xla/service/cpu:cpu_compiler",
         "//xla/service/cpu:cpu_runtime",
+        "//xla/service:compile_only_service"
     ],
 )
 
