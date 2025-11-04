@@ -119,55 +119,7 @@ T locale_independent_strtonum(const char* str, const char** endptr) {
 }  // namespace
 
 namespace strings {
-
-size_t FastInt32ToBufferLeft(int32_t i, char* buffer) {
-  uint32_t u = i;
-  size_t length = 0;
-  if (i < 0) {
-    *buffer++ = '-';
-    ++length;
-    // We need to do the negation in modular (i.e., "unsigned")
-    // arithmetic; MSVC++ apparently warns for plain "-u", so
-    // we write the equivalent expression "0 - u" instead.
-    u = 0 - u;
-  }
-  length += FastUInt32ToBufferLeft(u, buffer);
-  return length;
-}
-
-size_t FastUInt32ToBufferLeft(uint32_t i, char* buffer) {
-  char* start = buffer;
-  do {
-    *buffer++ = ((i % 10) + '0');
-    i /= 10;
-  } while (i > 0);
-  *buffer = 0;
-  std::reverse(start, buffer);
-  return buffer - start;
-}
-
-size_t FastInt64ToBufferLeft(int64_t i, char* buffer) {
-  uint64_t u = i;
-  size_t length = 0;
-  if (i < 0) {
-    *buffer++ = '-';
-    ++length;
-    u = 0 - u;
-  }
-  length += FastUInt64ToBufferLeft(u, buffer);
-  return length;
-}
-
-size_t FastUInt64ToBufferLeft(uint64_t i, char* buffer) {
-  char* start = buffer;
-  do {
-    *buffer++ = ((i % 10) + '0');
-    i /= 10;
-  } while (i > 0);
-  *buffer = 0;
-  std::reverse(start, buffer);
-  return buffer - start;
-}
+using strings_internal::kFastToBufferSize;
 
 static const double kDoublePrecisionCheckMax = DBL_MAX / 1.000000000000001;
 
