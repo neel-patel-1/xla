@@ -53,8 +53,7 @@ int main(int argc, char** argv) {
   auto platform = stream_executor::PlatformManager::PlatformWithName("Host").value();
   auto service = xla::CompileOnlyService::NewService(platform).value();
 
-  std::unique_ptr<xla::AotCompilationMetadata> metadata;
-  auto results = service->CompileAheadOfTime({instance}, aot_opts, &metadata).value();
+  auto results = service->CompileAheadOfTime({instance}, aot_opts, nullptr).value();
 
   // 5) Extract object bytes and write .o file
   auto* cpu_res =
