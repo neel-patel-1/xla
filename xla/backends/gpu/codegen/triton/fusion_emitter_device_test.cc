@@ -392,12 +392,9 @@ ENTRY entry_computation {
       CreateXTileIrAndFileCheck(this, kHloText, "fused_reduce", R"(
 CHECK: stablehlo.reduce
 CHECK: reducer(%[[ARG0:.*]]: tensor<f32>, %[[ARG1:.*]]: tensor<f32>)
-CHECK:   %[[SCALAR_0:.*]] = xtile.to_scalar %[[ARG0]] : tensor<f32>
-CHECK:   %[[SCALAR_1:.*]] = xtile.to_scalar %[[ARG1]] : tensor<f32>
-CHECK:   %[[ADD:.*]] = arith.addf %[[SCALAR_0]], %[[SCALAR_1]] : f32
+CHECK:   %[[ADD:.*]] = arith.addf %[[ARG0]], %[[ARG1]] : tensor<f32>
 CHECK:   %[[MIN:.*]] = arith.minimumf %[[ADD]]
-CHECK:   %[[TO_TENSOR:.*]] = xtile.to_tensor %[[MIN]] : f32
-CHECK:   stablehlo.return %[[TO_TENSOR]] : tensor<f32>
+CHECK:   stablehlo.return %[[MIN]] : tensor<f32>
 )"));
 
   TF_EXPECT_OK(LowerXTileIrToTritonAndFileCheck(
@@ -1033,11 +1030,8 @@ CHECK:  %[[CMPI:.*]] = arith.cmpi slt, %[[BROADCAST]]
 CHECK:  %[[SELECT:.*]] = arith.select %[[CMPI]], %[[LOAD]], %{{.*}}
 CHECK: %[[REDUCE:.*]] = stablehlo.reduce(%[[SELECT]] init: %{{.*}}) across dimensions = [0] : (tensor<8x4xf32>, tensor<f32>) -> tensor<4xf32>
 CHECK:   reducer(%[[ARG0:.*]]: tensor<f32>, %[[ARG1:.*]]: tensor<f32>)  {
-CHECK:   %[[SCALAR_0:.*]] = xtile.to_scalar %[[ARG0]] : tensor<f32>
-CHECK:   %[[SCALAR_1:.*]] = xtile.to_scalar %[[ARG1]] : tensor<f32>
-CHECK:   %[[MAX:.*]] = arith.maximumf %[[SCALAR_0]], %[[SCALAR_1]] : f32
-CHECK:   %[[TO_TENSOR:.*]] = xtile.to_tensor %[[MAX]] : f32
-CHECK:   stablehlo.return %[[TO_TENSOR]] : tensor<f32>
+CHECK:   %[[MAX:.*]] = arith.maximumf %[[ARG0]], %[[ARG1]] : tensor<f32>
+CHECK:   stablehlo.return %[[MAX]] : tensor<f32>
 CHECK: }
           )"));
 
@@ -1102,11 +1096,8 @@ CHECK-NEXT:       xtile.extract %[[P0]]
 CHECK-SAME:       [%[[PID]], %[[EXTRACT_IDX_0]]] [1, 128] [1, 1]
 CHECK:            stablehlo.reduce
 CHECK-NEXT:       reducer(%[[ARG2:[^:]*]]: tensor<f32>, %[[ARG3:[^:]*]]: tensor<f32>)  {
-CHECK-NEXT:           %[[ARG2_SCALAR:.*]] = xtile.to_scalar %[[ARG2]] : tensor<f32>
-CHECK-NEXT:           %[[ARG3_SCALAR:.*]] = xtile.to_scalar %[[ARG3]] : tensor<f32>
-CHECK-NEXT:           %[[ADD:.*]] = arith.addf %[[ARG2_SCALAR]], %[[ARG3_SCALAR]] : f32
-CHECK-NEXT:           %[[TO_TENSOR:.*]] = xtile.to_tensor %[[ADD]] : f32
-CHECK-NEXT:           stablehlo.return %[[TO_TENSOR]] : tensor<f32>
+CHECK:              %[[ADD:.*]] = arith.addf %[[ARG2]], %[[ARG3]] : tensor<f32>
+CHECK:              stablehlo.return %[[ADD]] : tensor<f32>
 CHECK-NEXT:       }
 CHECK:            arith.mulf
 CHECK-SAME:       tensor<1x128xf32>
@@ -1186,11 +1177,8 @@ CHECK-DAG:        %[[EXTRACT_IDX_1:.*]] = xla.apply_indexing #indexing_map(%[[TI
 CHECK-DAG:        xtile.extract %[[P1]][%[[EXTRACT_IDX_1]]] [128] [1] : {{.*}} -> tensor<128xf32>
 CHECK:            stablehlo.reduce
 CHECK-NEXT:       reducer(%[[ARG3:[^:]*]]: tensor<f32>, %[[ARG4:[^:]*]]: tensor<f32>)  {
-CHECK-NEXT:           %[[ARG3_SCALAR:.*]] = xtile.to_scalar %[[ARG3]] : tensor<f32>
-CHECK-NEXT:           %[[ARG4_SCALAR:.*]] = xtile.to_scalar %[[ARG4]] : tensor<f32>
-CHECK-NEXT:           %[[ADD:.*]] = arith.addf %[[ARG3_SCALAR]], %[[ARG4_SCALAR]] : f32
-CHECK-NEXT:           %[[TO_TENSOR:.*]] = xtile.to_tensor %[[ADD]] : f32
-CHECK-NEXT:           stablehlo.return %[[TO_TENSOR]] : tensor<f32>
+CHECK:              %[[ADD:.*]] = arith.addf %[[ARG3]], %[[ARG4]] : tensor<f32>
+CHECK:              stablehlo.return %[[ADD]] : tensor<f32>
 CHECK-NEXT:       }
 CHECK:            arith.mulf
 CHECK-DAG:        xtile.insert {{.*}} into %[[P2]]
@@ -1278,11 +1266,8 @@ CHECK-DAG:        %[[COL_INDEX_COPY:.*]] = xla.apply_indexing #[[MAP1]](%[[TID]]
 CHECK:            xtile.extract %[[P2]][%[[ROW_INDEX_COPY]], %[[COL_INDEX_COPY]]] [1, 1] [1, 1] : {{.*}} -> tensor<1x1xf32>
 CHECK:            stablehlo.reduce
 CHECK-NEXT:       reducer(%[[ARG4:[^:]*]]: tensor<f32>, %[[ARG5:[^:]*]]: tensor<f32>)  {
-CHECK-NEXT:           %[[ARG4_SCALAR:.*]] = xtile.to_scalar %[[ARG4]] : tensor<f32>
-CHECK-NEXT:           %[[ARG5_SCALAR:.*]] = xtile.to_scalar %[[ARG5]] : tensor<f32>
-CHECK-NEXT:           %[[MAX:.*]] = arith.maximumf %[[ARG4_SCALAR]], %[[ARG5_SCALAR]] : f32
-CHECK-NEXT:           %[[TO_TENSOR_MAX:.*]] = xtile.to_tensor %[[MAX]] : f32
-CHECK-NEXT:           stablehlo.return %[[TO_TENSOR_MAX]] : tensor<f32>
+CHECK:              %[[MAX:.*]] = arith.maximumf %[[ARG4]], %[[ARG5]] : tensor<f32>
+CHECK:              stablehlo.return %[[MAX]] : tensor<f32>
 CHECK-NEXT:       }
 CHECK:            xtile.insert {{.*}} into %[[P3]]{{.*}}
 )"));
@@ -2048,6 +2033,7 @@ ENTRY main {
 
 // CHECK: %[[EXTRACT:.*]] = xtile.extract %[[IN]]{{.*}}
 // CHECK: %[[PAD_VALUE:.*]] = arith.constant 1.000000e+00 : f32
+// CHECK: %[[TO_TENSOR_PAD_VALUE:.*]] = xtile.to_tensor %[[PAD_VALUE]]
 // CHECK: %[[TILE_OFFSET:.*]] = xla.apply_indexing
 // CHECK: %[[IOTA_VAL:.*]] = stablehlo.iota dim = 0 : tensor<32xi32>
 // CHECK: %[[IOTA:.*]] = stablehlo.broadcast_in_dim %[[IOTA_VAL]], dims = [0] : (tensor<32xi32>) -> tensor<32xi32>
@@ -2057,7 +2043,6 @@ ENTRY main {
 // CHECK: %[[TO_TENSOR_THRESHOLD:.*]] = xtile.to_tensor %[[THRESHOLD]]
 // CHECK: %[[THRESHOLD_SPLAT:.*]] = stablehlo.broadcast_in_dim %[[TO_TENSOR_THRESHOLD]], dims = []
 // CHECK: %[[MASK:.*]] = arith.cmpi slt, %[[IOTA]], %[[THRESHOLD_SPLAT]]
-// CHECK: %[[TO_TENSOR_PAD_VALUE:.*]] = xtile.to_tensor %[[PAD_VALUE]]
 // CHECK: %[[PAD_SPLAT:.*]] = stablehlo.broadcast_in_dim %[[TO_TENSOR_PAD_VALUE]], dims = []
 // CHECK: %[[SELECT:.*]] = arith.select %[[MASK]], %[[EXTRACT]], %[[PAD_SPLAT]]
 
@@ -2636,8 +2621,8 @@ ENTRY main {
   TF_ASSERT_OK_AND_ASSIGN(
       auto xtile_module_and_hlo_module,
       CreateXTileIrAndFileCheck(this, kHloText, "triton_computation", R"(
-CHECK:       %[[RES_TO_TENSOR:.*]] = xtile.to_tensor %[[ARG:.*]] : f32
-CHECK:       stablehlo.broadcast_in_dim %[[RES_TO_TENSOR]], dims = []
+CHECK:       %[[EXTRACTED_VALUE:.*]] = xtile.extract
+CHECK:       stablehlo.broadcast_in_dim %[[EXTRACTED_VALUE]], dims = []
           )"));
 
   TF_EXPECT_OK(LowerXTileIrToTritonAndFileCheck(
@@ -3098,8 +3083,7 @@ ENTRY entry_computation {
   TF_ASSERT_OK_AND_ASSIGN(
       auto xtile_module_and_hlo_module,
       CreateXTileIrAndFileCheck(this, kHloText, "triton_computation", R"(
-CHECK:     tensor.extract %{{.*}}[%{{.*}}, %{{.*}}, %{{.*}}, %{{.*}}] : tensor<1x1x1x1xf32>
-CHECK:     tensor.extract %{{.*}}[%{{.*}}] : tensor<1xf32>
+CHECK:     stablehlo.reshape {{.*}} : (tensor<1x1x1x1xf32>) -> tensor<f32>
 CHECK:     xtile.insert {{.*}} : tensor<f32>
 )"));
 
