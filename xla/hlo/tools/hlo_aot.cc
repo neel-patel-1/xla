@@ -9,6 +9,7 @@
 #include "xla/service/compiler.h"
 #include "xla/stream_executor/platform_manager.h"  // Added for PlatformManager
 
+using namespace xla;
 int main(int argc, char** argv) {
 
   absl::string_view hlo = R"(
@@ -20,6 +21,8 @@ int main(int argc, char** argv) {
       ROOT c = f32[2,2] dot(a, b), lhs_contracting_dims={1}, rhs_contracting_dims={0}
     }
   )";
+  std::unique_ptr<AotCompilationOptions> aot_options;
+
 
 
 
