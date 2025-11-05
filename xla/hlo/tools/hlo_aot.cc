@@ -37,6 +37,11 @@ absl::Status RunAotCompilationExample() {
     }
   )";
 
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> module,
+                      ParseAndReturnUnverifiedModule(
+                          hlo,
+                          HloModuleConfig() /* unused */));
+
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
                       xla::GetXlaPjrtCpuClient(client_options));
@@ -45,12 +50,6 @@ absl::Status RunAotCompilationExample() {
   TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace * memory_space,
                       device->default_memory_space());
   std::unique_ptr<xla::AotCompilationOptions> aot_options;
-
-  std::unique_ptr<xla::HloModule> module = std::make_unique<xla::VerifiedHloModule>(
-      "test", xla::HloModuleConfig() /* unused */,
-      /*verifier_layout_sensitive=*/false,
-      /*allow_mixed_precision_in_hlo_verifier=*/true,
-      xla::ShapeUtil::ByteSizeOfElements);
 
   auto compile_machine_features = absl::StrSplit("avx512f,avx512vl", ',');
   aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
@@ -69,6 +68,7 @@ absl::Status RunAotCompilationExample() {
     compile_options,
     *aot_options
   ));
+
 
   std::vector<std::unique_ptr<PjRtBuffer>> args_buffers;
   TF_ASSIGN_OR_RETURN(std::vector<xla::Literal> fake_args,
