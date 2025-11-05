@@ -24,18 +24,18 @@
 #include <iostream>
 
 using namespace xla;
-absl::Status RunAotCompilationExample() {
+absl::Status RunAotCompilationExample(std::string hlo_file, std::string features_str) {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features = llvm::sys::getHostCPUFeatures();
-  absl::string_view hlo = R"(
-    HloModule dot_f32
 
-    ENTRY e {
-      a = f32[2,2] parameter(0)
-      b = f32[2,2] parameter(1)
-      ROOT c = f32[2,2] dot(a, b), lhs_contracting_dims={1}, rhs_contracting_dims={0}
-    }
-  )";
+  // Read HLO from file
+  std::ifstream in_file(hlo_file);
+  if (!in_file) {
+    return absl::InvalidArgumentError(absl::StrCat("Failed to open HLO file: ", hlo_file));
+  }
+  std::stringstream buffer;
+  buffer << in_file.rdbuf();
+  std::string hlo = buffer.str();
 
   TF_ASSIGN_OR_RETURN(std::unique_ptr<HloModule> module,
                       ParseAndReturnUnverifiedModule(
@@ -51,7 +51,7 @@ absl::Status RunAotCompilationExample() {
                       device->default_memory_space());
   std::unique_ptr<xla::AotCompilationOptions> aot_options;
 
-  auto compile_machine_features = absl::StrSplit("avx512f,avx512vl", ',');
+  auto compile_machine_features = absl::StrSplit(features_str, ',');
   aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
       /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
       /*features=*/absl::StrJoin(compile_machine_features, ","),
@@ -136,7 +136,18 @@ absl::Status RunAotCompilationExample() {
 }
 
 int main(int argc, char** argv) {
+  if (argc != 3) {
+    std::cerr << "Usage: " << argv[0] << " <hlo_file> <compile_machine_features>" << std::endl;
+    std::cerr << "Example: " << argv[0] << " input.hlo avx512f,avx512vl" << std::endl;
+    return 1;
+  }
+  std::string hlo_file = argv[1];
+  std::string features = argv[2];
 
-  RunAotCompilationExample();
+  absl::Status status = RunAotCompilationExample(hlo_file, features);
+  if (!status.ok()) {
+    std::cerr << "Error: " << status.ToString() << std::endl;
+    return 1;
+  }
   return 0;
 }
