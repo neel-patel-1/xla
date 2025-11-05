@@ -80,6 +80,28 @@ absl::Status RunAotCompilationExample() {
     TF_RETURN_IF_ERROR(args_buffers.back()->GetReadyFuture().Await());
   }
 
+  ExecuteOptions execute_options;
+  execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
+  std::vector<PjRtBuffer*> arg_ptrs;
+  arg_ptrs.reserve(args_buffers.size());
+  for (const auto& buf : args_buffers) {
+    arg_ptrs.push_back(buf.get());
+  }
+
+  std::vector<std::unique_ptr<PjRtBuffer>> results;
+
+  auto run_benchmark_once = [&]() -> absl::Status {
+    results =
+        executable->ExecuteSharded(arg_ptrs, device, execute_options)
+            .value();
+    CHECK_OK(results[0]->GetReadyFuture().Await());
+    return absl::OkStatus();
+  };
+
+  TF_RETURN_IF_ERROR(run_benchmark_once());
+
+  return absl::OkStatus();
+
 }
 
 int main(int argc, char** argv) {
