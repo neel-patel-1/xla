@@ -177,6 +177,8 @@ class AxisRef {
 
   bool CanCoexist(const AxisRef& other) const;
 
+  bool Overlaps(const AxisRef& other) const;
+
   // Validates that the given mesh is compatible for this axis ref.
   absl::Status Validate(const Mesh& mesh) const;
   int64_t mesh_axis_index() const { return mesh_axis_index_; }
@@ -185,6 +187,13 @@ class AxisRef {
  private:
   absl::Status ValidateAxisRef();
 };
+
+bool AxesCanCoexistWithoutOverlap(absl::Span<const AxisRef> axes);
+
+// The span of axes is valid if (1) all axes are valid for the given mesh, and
+// (2) the axes can coexist without overlap.
+absl::Status ValidateSpanOfAxes(absl::Span<const AxisRef> axes,
+                                const Mesh& mesh);
 
 }  // namespace xla
 

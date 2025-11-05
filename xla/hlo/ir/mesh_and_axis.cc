@@ -33,6 +33,7 @@ limitations under the License.
 #include "llvm/ADT/STLExtras.h"
 #include "xla/array.h"
 #include "xla/hlo/ir/tile_assignment.h"
+#include "xla/tsl/platform/errors.h"
 #include "xla/xla_data.pb.h"
 
 namespace xla {
@@ -230,6 +231,45 @@ bool AxisRef::CanCoexist(const AxisRef& other) const {
 
   return canSubAxesCoexist(min_pre_size, max_pre_size, min_next_pre_size,
                            max_next_pre_size);
+}
+
+bool AxisRef::Overlaps(const AxisRef& other) const {
+  if (mesh_axis_index() != other.mesh_axis_index()) {
+    return false;
+  }
+
+  // If one is a full axis then they must overlap.
+  if (!sub_axis_info_.has_value() || !other.sub_axis_info_.has_value()) {
+    return true;
+  }
+
+  const SubAxis& this_sub_axis = sub_axis_info_.value();
+  const SubAxis& other_sub_axis = other.sub_axis_info_.value();
+
+  return this_sub_axis.pre_size < other_sub_axis.next_pre_size() &&
+         other_sub_axis.pre_size < this_sub_axis.next_pre_size();
+}
+
+bool AxesCanCoexistWithoutOverlap(absl::Span<const AxisRef> axes) {
+  for (int64_t i = 0; i < axes.size() - 1; ++i) {
+    for (int64_t j = i + 1; j < axes.size(); ++j) {
+      if (!axes[i].CanCoexist(axes[j]) || axes[i].Overlaps(axes[j])) {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+absl::Status ValidateSpanOfAxes(absl::Span<const AxisRef> axes,
+                                const Mesh& mesh) {
+  for (const AxisRef& axis : axes) {
+    TF_RETURN_IF_ERROR(axis.Validate(mesh));
+  }
+  if (!AxesCanCoexistWithoutOverlap(axes)) {
+    return absl::InvalidArgumentError("Axes cannot coexist or axes overlap.");
+  }
+  return absl::OkStatus();
 }
 
 }  // namespace xla
