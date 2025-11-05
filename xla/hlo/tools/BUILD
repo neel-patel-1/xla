@@ -167,7 +167,15 @@ cc_binary(
         "//xla/service:service",
         "//xla/service/cpu:cpu_compiler",
         "//xla/service/cpu:cpu_runtime",
-        "//xla/service:compile_only_service"
+        "//xla/service:compile_only_service",
+        "//xla/pjrt/proto:compile_options_proto_cc",
+        "//xla/pjrt/proto:pjrt_value_type_proto_cc",  # Add this for pjrt_value_type.pb.h
+        "//xla/pjrt/proto:pjrt_device_dimensions_proto_cc",
+        "//xla/pjrt/proto:executable_metadata_proto_cc",
+        "//xla/pjrt/proto:execute_options_proto_cc",
+        "//xla/pjrt/proto:pjrt_partial_program_proto_cc",
+        "//xla/pjrt/proto:topology_description_proto_cc",
+        "//xla/pjrt/plugin/xla_cpu:cpu_topology_description",
     ],
 )
 
