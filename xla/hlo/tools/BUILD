@@ -161,6 +161,7 @@ xla_cc_binary(
 cc_binary(
     name = "hlo_aot",
     srcs = ["hlo_aot.cc"],
+    testonly = True,
     deps = [
         "//xla/hlo/parser:hlo_parser",
         "//xla/stream_executor/host:host_platform",
@@ -179,6 +180,7 @@ cc_binary(
         "//xla/pjrt/cpu:cpu_client",
         "//xla/pjrt:async_work_runner",
         "//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "//xla/hlo/testlib:verified_hlo_module",
     ],
 )
 
