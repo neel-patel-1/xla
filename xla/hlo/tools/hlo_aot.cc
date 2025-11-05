@@ -98,7 +98,38 @@ absl::Status RunAotCompilationExample() {
     return absl::OkStatus();
   };
 
-  TF_RETURN_IF_ERROR(run_benchmark_once());
+  // Run benchmark multiple times to achieve 95% CI within 5% of mean
+  const int max_runs = 1000;  // Safety limit
+  std::vector<double> times;
+  times.reserve(max_runs);
+
+  for (int i = 0; i < max_runs; ++i) {
+    auto start = std::chrono::high_resolution_clock::now();
+    TF_RETURN_IF_ERROR(run_benchmark_once());
+    auto end = std::chrono::high_resolution_clock::now();
+    std::chrono::duration<double> diff = end - start;
+    times.push_back(diff.count());
+
+    // Compute mean and std dev
+    double sum = 0.0;
+    for (double t : times) sum += t;
+    double mean = sum / times.size();
+    double var = 0.0;
+    for (double t : times) var += (t - mean) * (t - mean);
+    double std_dev = std::sqrt(var / (times.size() - 1));
+    double ci_half_width = 1.96 * std_dev / std::sqrt(times.size());
+    double relative_ci = ci_half_width / mean;
+
+    if (relative_ci <= 0.05) {  // 5% of mean
+      std::cout << "Achieved 95% CI within 5% of mean after " << times.size() << " runs." << std::endl;
+      std::cout << "Mean time: " << mean * 1000 << " ms, Std dev: " << std_dev * 1000 << " ms, CI half-width: " << ci_half_width * 1000 << " ms" << std::endl;
+      break;
+    }
+  }
+
+  if (times.size() == max_runs) {
+    std::cout << "Reached max runs without achieving CI target." << std::endl;
+  }
 
   return absl::OkStatus();
 
