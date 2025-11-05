@@ -20,6 +20,7 @@
 #include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/service/hlo_module_config.h"
 #include "xla/shape_util.h"
+#include "xla/tests/test_utils.h"
 #include <iostream>
 
 absl::Status RunAotCompilationExample() {
@@ -67,6 +68,7 @@ absl::Status RunAotCompilationExample() {
     compile_options,
     *aot_options
   ));
+
 }
 
 int main(int argc, char** argv) {
