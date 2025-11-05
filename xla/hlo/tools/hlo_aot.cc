@@ -27,11 +27,12 @@ int main(int argc, char** argv) {
 
 
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features = llvm::sys::getHostCPUFeatures();
+  auto compile_machine_features = absl::StrSplit("avx512f,avx512vl", ',');
 
   std::unique_ptr<xla::AotCompilationOptions> aot_options;
   aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
       /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
-      /*features=*/"avx512f,avx512vl",
+      /*features=*/absl::StrJoin(compile_machine_features, ","),
       /*entry_point_name=*/"dot_f32",
       /*relocation_model=*/xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
 
