@@ -176,6 +176,9 @@ cc_binary(
         "//xla/pjrt/proto:pjrt_partial_program_proto_cc",
         "//xla/pjrt/proto:topology_description_proto_cc",
         "//xla/pjrt/plugin/xla_cpu:cpu_topology_description",
+        "//xla/pjrt/cpu:cpu_client",
+        "//xla/pjrt:async_work_runner",
+        "//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
     ],
 )
 
