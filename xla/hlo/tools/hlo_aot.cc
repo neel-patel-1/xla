@@ -23,6 +23,7 @@
 #include "xla/tests/test_utils.h"
 #include <iostream>
 
+using namespace xla;
 absl::Status RunAotCompilationExample() {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features = llvm::sys::getHostCPUFeatures();
@@ -68,6 +69,16 @@ absl::Status RunAotCompilationExample() {
     compile_options,
     *aot_options
   ));
+
+  std::vector<std::unique_ptr<PjRtBuffer>> args_buffers;
+  TF_ASSIGN_OR_RETURN(std::vector<xla::Literal> fake_args,
+                      xla::MakeFakeArguments(module.get()));
+  args_buffers.reserve(fake_args.size());
+  for (const Literal& arg : fake_args) {
+    TF_ASSIGN_OR_RETURN(args_buffers.emplace_back(),
+                        client->BufferFromHostLiteral(arg, memory_space));
+    TF_RETURN_IF_ERROR(args_buffers.back()->GetReadyFuture().Await());
+  }
 
 }
 
