@@ -51,7 +51,17 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
                       device->default_memory_space());
   std::unique_ptr<xla::AotCompilationOptions> aot_options;
 
-  auto compile_machine_features = absl::StrSplit(features_str, ',');
+  std::vector<std::string> compile_machine_features = absl::StrSplit(features_str, ',');
+  if (features_str == "all"){
+    llvm::StringMap<bool> host_machine_features = llvm::sys::getHostCPUFeatures();
+    compile_machine_features.clear();
+    for (const auto& feature : host_machine_features) {
+      if (feature.second) {
+        compile_machine_features.push_back(feature.first().str());
+      }
+    }
+  }
+
   aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
       /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
       /*features=*/absl::StrJoin(compile_machine_features, ","),
