@@ -119,6 +119,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
     auto end = std::chrono::high_resolution_clock::now();
     std::chrono::duration<double> diff = end - start;
     times.push_back(diff.count());
+    std::cout<< "Run " << i+1 << ": " << diff.count() * 1000 << " ms" <<std::endl;
 
     // Compute mean and std dev
     double sum = 0.0;
