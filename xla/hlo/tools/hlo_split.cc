@@ -19,6 +19,9 @@
 #include "xla/tsl/platform/statusor.h"  // Add for TF_ASSIGN_OR_RETURN
 #include "xla/hlo/testlib/verified_hlo_module.h"
 #include "xla/service/hlo_module_config.h"
+#include "xla/hlo/ir/hlo_module.h"
+#include "xla/hlo/ir/hlo_computation.h"
+#include "xla/hlo/ir/hlo_instruction.h"
 #include "xla/shape_util.h"
 #include "xla/tests/test_utils.h"
 

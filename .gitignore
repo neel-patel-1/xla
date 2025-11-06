@@ -28,3 +28,8 @@ tools/python_bin_path.sh
 *.VC.opendb
 *.suo
 *.user
+.gdb_history
+logs
+xla/logs
+xla/python_api/__pycache__/
+
