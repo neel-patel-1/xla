@@ -93,7 +93,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
       /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
       /*features=*/absl::StrJoin(compile_machine_features, ","),
-      /*entry_point_name=*/"dot_f32",
+      /*entry_point_name=*/"main.1",
       /*relocation_model=*/xla::cpu::CpuAotCompilationOptions::RelocationModel::Static
   );
 
