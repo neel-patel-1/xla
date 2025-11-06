@@ -72,8 +72,6 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
                           hlo,
                           HloModuleConfig() /* unused */));
 
-  int num_params = module->entry_computation_layout().parameter_count();
-
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
                       xla::GetXlaPjrtCpuClient(client_options));
@@ -112,23 +110,35 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   ));
 
 
+  ExecuteOptions execute_options;
+  execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
+
+  int num_params = module->entry_computation_layout().parameter_count();
+  std::vector<xla::Literal> input_lits;
+  input_lits.reserve(num_params);
+
+  for (int i = 0; i < num_params; ++i){
+    std::string path =
+    absl::StrCat(io_prefix, "/input_", i, ".litpb");
+    TF_ASSIGN_OR_RETURN(auto lit, LoadLiteralFromProtoFile(path));
+    input_lits.push_back(std::move(lit));
+  }
+
   std::vector<std::unique_ptr<PjRtBuffer>> args_buffers;
-  TF_ASSIGN_OR_RETURN(std::vector<xla::Literal> fake_args,
-                      xla::MakeFakeArguments(module.get()));
-  args_buffers.reserve(fake_args.size());
-  for (const Literal& arg : fake_args) {
+  args_buffers.reserve(input_lits.size());
+
+  for (const xla::Literal& arg_lit : input_lits) {
     TF_ASSIGN_OR_RETURN(args_buffers.emplace_back(),
-                        client->BufferFromHostLiteral(arg, memory_space));
+                        client->BufferFromHostLiteral(arg_lit, memory_space));
     TF_RETURN_IF_ERROR(args_buffers.back()->GetReadyFuture().Await());
   }
 
-  ExecuteOptions execute_options;
-  execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
   std::vector<PjRtBuffer*> arg_ptrs;
   arg_ptrs.reserve(args_buffers.size());
-  for (const auto& buf : args_buffers) {
+  for (auto& buf : args_buffers) {
     arg_ptrs.push_back(buf.get());
   }
+
 
   std::vector<std::unique_ptr<PjRtBuffer>> results;
 
