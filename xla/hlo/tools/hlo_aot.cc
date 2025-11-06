@@ -54,7 +54,7 @@ absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   return lit;
 }
 
-absl::Status RunAotCompilationExample(std::string hlo_file, std::string features_str) {
+absl::Status RunAotCompilationExample(std::string hlo_file, std::string features_str, std::string io_prefix) {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features = llvm::sys::getHostCPUFeatures();
 
@@ -71,6 +71,8 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
                       ParseAndReturnUnverifiedModule(
                           hlo,
                           HloModuleConfig() /* unused */));
+
+  int num_params = module->entry_computation_layout().parameter_count();
 
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
@@ -184,8 +186,9 @@ int main(int argc, char** argv) {
   }
   std::string hlo_file = argv[1];
   std::string features = argv[2];
+  std::string io_prefix = argv[3];
 
-  absl::Status status = RunAotCompilationExample(hlo_file, features);
+  absl::Status status = RunAotCompilationExample(hlo_file, features, io_prefix);
   if (!status.ok()) {
     std::cerr << "Error: " << status.ToString() << std::endl;
     return 1;
