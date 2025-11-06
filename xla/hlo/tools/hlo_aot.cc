@@ -28,6 +28,7 @@
 #include "tsl/platform/statusor.h"
 #include "xla/tests/literal_test_util.h"
 #include "xla/xla_data.pb.h"
+#include "xla/error_spec.h"
 
 #include <iostream>
 
@@ -143,6 +144,23 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   TF_ASSIGN_OR_RETURN(
     auto result_buffers,
     executable->ExecuteSharded(arg_ptrs, device, execute_options));
+
+  TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
+
+  TF_ASSIGN_OR_RETURN(
+    std::shared_ptr<xla::Literal> out_lit,
+    result_buffers[0]->ToLiteralSync());
+
+  // Load reference from JAX
+  std::string ref_path =
+      absl::StrCat(io_prefix, "/output_0.ref.litpb");
+  TF_ASSIGN_OR_RETURN(xla::Literal ref_lit,
+                      LoadLiteralFromProtoFile(ref_path));
+
+  EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *out_lit, ErrorSpec(1e-5, 1e-5)));
+
+
+  std::cout << "Output matches reference." << std::endl;
 
   std::vector<std::unique_ptr<PjRtBuffer>> results;
 
