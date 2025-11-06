@@ -211,9 +211,11 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
 }
 
 int main(int argc, char** argv) {
-  if (argc != 3) {
-    std::cerr << "Usage: " << argv[0] << " <hlo_file> <compile_machine_features>" << std::endl;
-    std::cerr << "Example: " << argv[0] << " input.hlo avx512f,avx512vl" << std::endl;
+  if (argc != 4) {
+    std::cerr << "Usage: " << argv[0] << " <hlo_file> <cpu_features> <io_prefix>" << std::endl;
+    std::cerr << "  <hlo_file>: Path to the HLO text file." << std::endl;
+    std::cerr << "  <cpu_features>: Comma-separated CPU features to enable (or 'all' for all features)." << std::endl;
+    std::cerr << "  <io_prefix>: Prefix path for input/output literal files." << std::endl;
     return 1;
   }
   std::string hlo_file = argv[1];
