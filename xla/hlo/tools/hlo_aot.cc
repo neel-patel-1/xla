@@ -76,9 +76,6 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
                       xla::GetXlaPjrtCpuClient(client_options));
 
-  xla::PjRtDevice* device = client->devices().front();
-  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace * memory_space,
-                      device->default_memory_space());
   std::unique_ptr<xla::AotCompilationOptions> aot_options;
 
   std::vector<std::string> compile_machine_features = absl::StrSplit(features_str, ',');
@@ -110,9 +107,6 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   ));
 
 
-  ExecuteOptions execute_options;
-  execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
-
   int num_params = module->entry_computation_layout().parameter_count();
   std::vector<xla::Literal> input_lits;
   input_lits.reserve(num_params);
@@ -127,6 +121,10 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   std::vector<std::unique_ptr<PjRtBuffer>> args_buffers;
   args_buffers.reserve(input_lits.size());
 
+  xla::PjRtDevice* device = client->devices().front();
+  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace * memory_space,
+                      device->default_memory_space());
+
   for (const xla::Literal& arg_lit : input_lits) {
     TF_ASSIGN_OR_RETURN(args_buffers.emplace_back(),
                         client->BufferFromHostLiteral(arg_lit, memory_space));
@@ -139,6 +137,12 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
     arg_ptrs.push_back(buf.get());
   }
 
+  ExecuteOptions execute_options;
+  execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
+
+  TF_ASSIGN_OR_RETURN(
+    auto result_buffers,
+    executable->ExecuteSharded(arg_ptrs, device, execute_options));
 
   std::vector<std::unique_ptr<PjRtBuffer>> results;
 
