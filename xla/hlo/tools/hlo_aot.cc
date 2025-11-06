@@ -21,9 +21,39 @@
 #include "xla/service/hlo_module_config.h"
 #include "xla/shape_util.h"
 #include "xla/tests/test_utils.h"
+
+#include "xla/literal.h"
+#include "xla/literal_util.h"
+#include "tsl/platform/env.h"
+#include "tsl/platform/statusor.h"
+#include "xla/tests/literal_test_util.h"
+#include "xla/xla_data.pb.h"
+
 #include <iostream>
 
 using namespace xla;
+
+absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
+  std::string data;
+  {
+    std::unique_ptr<tsl::RandomAccessFile> file;
+    TF_RETURN_IF_ERROR(
+        tsl::Env::Default()->NewRandomAccessFile(path, &file));
+    tsl::uint64 size = 0;
+    TF_RETURN_IF_ERROR(tsl::Env::Default()->GetFileSize(path, &size));
+    data.resize(size);
+    tsl::StringPiece sp;
+    TF_RETURN_IF_ERROR(file->Read(0, size, &sp, &data[0]));
+  }
+
+  xla::LiteralProto proto;
+  if (!proto.ParseFromString(data)) {
+    return absl::InternalError("Failed to parse LiteralProto from " + path);
+  }
+  TF_ASSIGN_OR_RETURN(xla::Literal lit, xla::Literal::CreateFromProto(proto));
+  return lit;
+}
+
 absl::Status RunAotCompilationExample(std::string hlo_file, std::string features_str) {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features = llvm::sys::getHostCPUFeatures();

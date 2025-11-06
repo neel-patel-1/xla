@@ -182,6 +182,7 @@ cc_binary(
         "//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
         "//xla/hlo/testlib:verified_hlo_module",
         "//xla/tests:test_utils",
+        "//xla/tests:literal_test_util",
     ],
 )
 
