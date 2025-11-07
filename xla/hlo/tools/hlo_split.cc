@@ -36,6 +36,21 @@
 #include <iostream>
 
 using namespace xla;
+using xla::HloModule;
+using xla::HloComputation;
+using xla::HloInstruction;
+
+struct InstructionFragment {
+  std::unique_ptr<HloModule>  module;
+  const xla::HloInstruction* original_instr;
+  std::vector<const xla::HloInstruction*> original_operands;
+};
+
+// Small holder tying a fragment to its compiled executable.
+struct CompiledFragment {
+  InstructionFragment frag;
+  std::unique_ptr<xla::PjRtLoadedExecutable> exec;
+};
 
 absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   std::string data;
@@ -58,6 +73,152 @@ absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   return lit;
 }
 
+absl::StatusOr<std::vector<InstructionFragment>> SplitModulePerInstruction(const HloModule& module) {
+  const xla::HloComputation* entry = module.entry_computation();
+  std::vector<xla::HloInstruction*> order = entry->MakeInstructionPostOrder();
+
+  std::vector<InstructionFragment> fragments;
+  fragments.reserve(order.size());
+
+  xla::HloModuleConfig base_cfg = module.config();
+
+  for (xla::HloInstruction* instr : order) {
+    std::string mod_name = absl::StrCat("frag_", instr->name());
+
+    xla::HloModuleConfig cfg(base_cfg);
+    auto frag = std::make_unique<xla::HloModule>(mod_name, cfg);
+  }
+}
+
+// Compile each fragment with maybe different feature sets.
+// For simplicity, this uses the same features for all; you can vary it
+// by index or opcode.
+absl::StatusOr<std::vector<CompiledFragment>>
+CompileFragments(const std::vector<InstructionFragment>& fragments,
+                 const std::string& cpu_name,
+                 const std::string& features) {
+  // CPU PJRT client
+  xla::CpuClientOptions client_options;
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
+                      xla::GetXlaPjrtCpuClient(client_options));
+  auto* cpu_client = tsl::down_cast<xla::PjRtCpuClient*>(client.get());
+
+  xla::CompileOptions compile_options;
+
+  std::vector<CompiledFragment> compiled;
+  compiled.reserve(fragments.size());
+
+  for (const auto& frag : fragments) {
+    xla::XlaComputation computation(frag.module->ToProto());
+
+    auto entry_point = std::string(frag.module->entry_computation()->name());
+    auto aot_opts = xla::cpu::CpuAotCompilationOptions(
+        /*triple=*/"x86_64-unknown-linux-gnu",
+        /*cpu_name=*/cpu_name,
+        /*features=*/features,
+        /*entry_point_name=*/entry_point,
+        /*relocation_model=*/
+        xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
+
+    TF_ASSIGN_OR_RETURN(
+        std::unique_ptr<xla::PjRtLoadedExecutable> exec,
+        cpu_client->CompileAheadOfTimeAndLoad(
+            computation, compile_options, aot_opts));
+
+    CompiledFragment cf;
+    cf.frag = InstructionFragment{
+        /*module=*/std::unique_ptr<xla::HloModule>(
+            frag.module->Clone()),  // or keep by pointer/ref
+        /*original_instr=*/frag.original_instr,
+        /*original_operands=*/frag.original_operands};
+    cf.exec = std::move(exec);
+    compiled.push_back(std::move(cf));
+  }
+
+  return compiled;
+}
+
+absl::Status RunFragmentsSequentially(
+    const xla::HloModule& original,
+    const std::vector<CompiledFragment>& compiled_frags,
+    const std::vector<std::unique_ptr<xla::PjRtBuffer>>& entry_param_buffers,
+    xla::PjRtClient* client) {
+
+  xla::PjRtDevice* device = client->devices().front();
+  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace* memory_space,
+                      device->default_memory_space());
+
+  // Map original HloInstruction* -> computed device buffer.
+  absl::flat_hash_map<const xla::HloInstruction*,
+                      std::unique_ptr<xla::PjRtBuffer>>
+      value_map;
+
+  // Seed map with original parameters: param(i) -> entry_param_buffers[i]
+  const xla::HloComputation* entry = original.entry_computation();
+  for (xla::HloInstruction* instr : entry->parameter_instructions()) {
+    int param_idx = instr->parameter_number();
+    // Clone the buffer pointer (just move a unique_ptr if you own them).
+    // Here we assume entry_param_buffers already live long enough and
+    // we just *point* to them:
+    // (If you want ownership, wrap them differently.)
+    // We'll store raw pointers for simplicity:
+    // value_map[instr] = <PjRtBuffer*>;
+    // In a real implementation, choose a consistent ownership model.
+  }
+
+  xla::ExecuteOptions exec_opts;
+  exec_opts.execution_mode = xla::ExecuteOptions::ExecutionMode::kSynchronous;
+
+  // Execute fragments in the same order as SplitModulePerInstruction.
+  for (const auto& cf : compiled_frags) {
+    const InstructionFragment& frag = cf.frag;
+    const xla::HloInstruction* orig_instr = frag.original_instr;
+
+    // 1) Build the arg list for this fragment from value_map and params.
+    std::vector<xla::PjRtBuffer*> arg_ptrs;
+    arg_ptrs.reserve(frag.original_operands.size());
+
+    for (const xla::HloInstruction* op : frag.original_operands) {
+      if (op->opcode() == xla::HloOpcode::kParameter) {
+        int param_idx = op->parameter_number();
+        arg_ptrs.push_back(entry_param_buffers[param_idx].get());
+      } else {
+        // internal value, must have been produced by an earlier fragment
+        auto it = value_map.find(op);
+        if (it == value_map.end()) {
+          return absl::InternalError(
+              absl::StrCat("Missing value for operand ", op->name(),
+                           " of instruction ", orig_instr->name()));
+        }
+        arg_ptrs.push_back(it->second.get());
+      }
+    }
+
+    // 2) Execute the fragment
+    TF_ASSIGN_OR_RETURN(
+        std::vector<std::unique_ptr<xla::PjRtBuffer>> res,
+        cf.exec->ExecuteSharded(arg_ptrs, device, exec_opts));
+    TF_RETURN_IF_ERROR(res[0]->GetReadyFuture().Await());
+
+    // 3) Store its output in value_map
+    value_map[orig_instr] = std::move(res[0]);
+  }
+
+  // At this point, the ROOT instruction's value is in value_map[entry->root_instruction()].
+  const xla::HloInstruction* root = entry->root_instruction();
+  auto it = value_map.find(root);
+  if (it == value_map.end()) {
+    return absl::InternalError("No value for ROOT instruction");
+  }
+
+  // Optionally convert ROOT buffer to Literal for correctness checking:
+  TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> out_lit,
+                      it->second->ToLiteralSync());
+  // Compare vs reference, etc.
+
+  return absl::OkStatus();
+}
+
 absl::Status RunAotCompilationExample(std::string hlo_file, std::string features_str, std::string io_prefix) {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features = llvm::sys::getHostCPUFeatures();
@@ -75,6 +236,10 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
                       ParseAndReturnUnverifiedModule(
                           hlo,
                           HloModuleConfig() /* unused */));
+
+  TF_ASSIGN_OR_RETURN(std::vector<InstructionFragment> frags,
+                      SplitModulePerInstruction(*module));
+
 
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
