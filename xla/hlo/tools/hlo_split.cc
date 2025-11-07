@@ -87,19 +87,17 @@ SplitModulePerInstruction(const xla::HloModule& module) {
   xla::HloModuleConfig base_cfg = module.config();
 
   for (xla::HloInstruction* instr : order) {
-    // Skip parameters if you don't want trivial "identity" fragments.
-    // For now, let's keep *all* instructions including params, so
-    // you can see every step. You can easily filter on opcode.
     std::string mod_name = absl::StrCat("frag_", instr->name());
 
+    if (instr->opcode() == xla::HloOpcode::kParameter) {
+      continue;
+    }
+
     xla::HloModuleConfig cfg(base_cfg);
+    cfg.clear_entry_computation_layout();
     auto frag = std::make_unique<xla::HloModule>(mod_name, cfg);
 
     xla::HloComputation::Builder b(absl::StrCat(mod_name, "_entry"));
-
-    // Map from original operand -> new parameter instruction in this fragment.
-    absl::flat_hash_map<const xla::HloInstruction*, xla::HloInstruction*>
-        op_to_param;
 
     std::vector<xla::HloInstruction*> new_operands;
     new_operands.reserve(instr->operand_count());
@@ -112,7 +110,6 @@ SplitModulePerInstruction(const xla::HloModule& module) {
       auto* p = b.AddInstruction(xla::HloInstruction::CreateParameter(
           param_idx, op->shape(),
           absl::StrCat("p", param_idx, "_for_", instr->name())));
-      op_to_param[op] = p;
       new_operands.push_back(p);
       orig_ops.push_back(op);
       ++param_idx;
@@ -127,6 +124,8 @@ SplitModulePerInstruction(const xla::HloModule& module) {
     // Build computation with 'cloned' as ROOT.
     xla::HloComputation* comp =
         frag->AddEntryComputation(b.Build(cloned));
+    frag->mutable_config().SetDefaultComputationLayout(
+        comp->ComputeProgramShape());
     (void)comp;  // silence unused warning if not used
 
     InstructionFragment info;
@@ -146,12 +145,8 @@ SplitModulePerInstruction(const xla::HloModule& module) {
 absl::StatusOr<std::vector<CompiledFragment>>
 CompileFragments(const std::vector<InstructionFragment>& fragments,
                  const std::string& cpu_name,
-                 const std::string& features) {
-  // CPU PJRT client
-  xla::CpuClientOptions client_options;
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
-                      xla::GetXlaPjrtCpuClient(client_options));
-  auto* cpu_client = tsl::down_cast<xla::PjRtCpuClient*>(client.get());
+                 const std::string& features,
+                 xla::PjRtCpuClient* cpu_client) {
 
   xla::CompileOptions compile_options;
 
@@ -294,47 +289,13 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
     std::cout << "Fragment for instruction: " << frag.original_instr->name() << std::endl;
   }
 
-  TF_ASSIGN_OR_RETURN(std::vector<CompiledFragment> compiled_frags,
-                       CompileFragments(frags, "skylake-avx512", features_str));
-
-  TF_RETURN_IF_ERROR(
-      RunFragmentsSequentially(*module, compiled_frags, /*entry_param_buffers=*/{}, /*client=*/nullptr));
-  return absl::OkStatus();
-
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
                       xla::GetXlaPjrtCpuClient(client_options));
-
-  std::unique_ptr<xla::AotCompilationOptions> aot_options;
-
-  std::vector<std::string> compile_machine_features = absl::StrSplit(features_str, ',');
-  if (features_str == "all"){
-    llvm::StringMap<bool> host_machine_features = llvm::sys::getHostCPUFeatures();
-    compile_machine_features.clear();
-    for (const auto& feature : host_machine_features) {
-      if (feature.second) {
-        compile_machine_features.push_back(feature.first().str());
-      }
-    }
-  }
-
-  aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
-      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
-      /*features=*/absl::StrJoin(compile_machine_features, ","),
-      /*entry_point_name=*/"main.1",
-      /*relocation_model=*/xla::cpu::CpuAotCompilationOptions::RelocationModel::Static
-  );
-
-  xla::XlaComputation computation(module->ToProto());
   auto* cpu_client = tsl::down_cast<xla::PjRtCpuClient*>(client.get());
-  std::unique_ptr<xla::PjRtLoadedExecutable> executable;
-  TF_ASSIGN_OR_RETURN( executable,
-    cpu_client->CompileAheadOfTimeAndLoad(
-    computation,
-    compile_options,
-    *aot_options
-  ));
 
+  TF_ASSIGN_OR_RETURN(std::vector<CompiledFragment> compiled_frags,
+                       CompileFragments(frags, "skylake-avx512", features_str, cpu_client));
 
   int num_params = module->entry_computation_layout().parameter_count();
   std::vector<xla::Literal> input_lits;
@@ -342,7 +303,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
 
   for (int i = 0; i < num_params; ++i){
     std::string path =
-    absl::StrCat(io_prefix, "/input_", i, ".litpb");
+        absl::StrCat(io_prefix, "/input_", i, ".litpb");
     TF_ASSIGN_OR_RETURN(auto lit, LoadLiteralFromProtoFile(path));
     input_lits.push_back(std::move(lit));
   }
@@ -365,6 +326,39 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   for (auto& buf : args_buffers) {
     arg_ptrs.push_back(buf.get());
   }
+
+  TF_RETURN_IF_ERROR(
+      RunFragmentsSequentially(*module, compiled_frags, args_buffers, client.get()));
+
+  std::unique_ptr<xla::AotCompilationOptions> aot_options;
+
+  std::vector<std::string> compile_machine_features = absl::StrSplit(features_str, ',');
+  if (features_str == "all"){
+    llvm::StringMap<bool> host_machine_features = llvm::sys::getHostCPUFeatures();
+    compile_machine_features.clear();
+    for (const auto& feature : host_machine_features) {
+      if (feature.second) {
+        compile_machine_features.push_back(feature.first().str());
+      }
+    }
+  }
+
+  aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
+      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
+      /*features=*/absl::StrJoin(compile_machine_features, ","),
+      /*entry_point_name=*/"main.1",
+      /*relocation_model=*/xla::cpu::CpuAotCompilationOptions::RelocationModel::Static
+  );
+
+  xla::XlaComputation computation(module->ToProto());
+  std::unique_ptr<xla::PjRtLoadedExecutable> executable;
+  TF_ASSIGN_OR_RETURN( executable,
+    cpu_client->CompileAheadOfTimeAndLoad(
+    computation,
+    compile_options,
+    *aot_options
+  ));
+
 
   ExecuteOptions execute_options;
   execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
