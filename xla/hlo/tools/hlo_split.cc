@@ -243,6 +243,8 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   TF_ASSIGN_OR_RETURN(std::vector<CompiledFragment> compiled_frags,
                        CompileFragments(frags, "skylake-avx512", features_str));
 
+  TF_RETURN_IF_ERROR(
+      RunFragmentsSequentially(*module, compiled_frags, /*entry_param_buffers=*/{}, /*client=*/nullptr));
   return absl::OkStatus();
 
   xla::CpuClientOptions client_options;
