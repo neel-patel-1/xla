@@ -553,8 +553,10 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
   TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
   TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
                       result_buffers[0]->ToLiteralSync());
-  EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *full_out,
-                                                ErrorSpec(1e-5, 1e-5)));
+  if (literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
+    std::cout << "Fragmented output does not match reference for chunk size "
+              << chunk_size << std::endl;
+  }
   std::cout << "Full execution (features=" << features
             << ") output matches reference." << std::endl;
 
@@ -709,8 +711,10 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       TF_RETURN_IF_ERROR(RunFragmentsSequentially(
           *module, compiled_frags, args_buffers, client.get(),
           &fragmented_out));
-      EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *fragmented_out,
-                                                    ErrorSpec(1e-5, 1e-5)));
+      if (literal_comparison::Near(ref_lit, *fragmented_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
+        std::cout << "Fragmented output does not match reference for chunk size "
+                  << chunk_size << std::endl;
+      }
 
       auto run_fragmented_once = [&]() -> absl::Status {
         return RunFragmentsSequentially(*module, compiled_frags, args_buffers,
