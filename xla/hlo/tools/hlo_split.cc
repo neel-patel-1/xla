@@ -533,7 +533,7 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
     const std::vector<PjRtBuffer*>& arg_ptrs, xla::PjRtDevice* device,
     xla::PjRtCpuClient* cpu_client, const xla::Literal& ref_lit) {
   auto aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
-      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
+      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"sapphirerapids",
       /*features=*/features,
       /*entry_point_name=*/"main.1",
       /*relocation_model=*/
@@ -578,7 +578,7 @@ std::string DescribePolicy(const FeaturePolicy& policy) {
     return token.empty() ? std::string("<default>") : token;
   }
   return absl::StrCat("cycle(",
-                      absl::StrJoin(policy.tokens(), ", "), ")");
+                      absl::StrJoin(policy.tokens(), "| "), ")");
 }
 
 absl::Status RunAotCompilationExample(std::string hlo_file,
@@ -704,7 +704,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
         continue;
       }
       TF_ASSIGN_OR_RETURN(auto compiled_frags,
-                          CompileFragments(fragments, "skylake-avx512",
+                          CompileFragments(fragments, "sapphirerapids",
                                            policy, chunk_size, cpu_client));
 
       std::shared_ptr<xla::Literal> fragmented_out;
