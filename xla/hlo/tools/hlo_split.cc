@@ -240,6 +240,10 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   TF_ASSIGN_OR_RETURN(std::vector<InstructionFragment> frags,
                       SplitModulePerInstruction(*module));
 
+  TF_ASSIGN_OR_RETURN(std::vector<CompiledFragment> compiled_frags,
+                       CompileFragments(frags, "skylake-avx512", features_str));
+
+  return absl::OkStatus();
 
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
