@@ -73,21 +73,71 @@ absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   return lit;
 }
 
-absl::StatusOr<std::vector<InstructionFragment>> SplitModulePerInstruction(const HloModule& module) {
+absl::StatusOr<std::vector<InstructionFragment>>
+SplitModulePerInstruction(const xla::HloModule& module) {
   const xla::HloComputation* entry = module.entry_computation();
+
+  // Get a topological order; MakeInstructionPostOrder is fine.
   std::vector<xla::HloInstruction*> order = entry->MakeInstructionPostOrder();
 
   std::vector<InstructionFragment> fragments;
   fragments.reserve(order.size());
 
+  // Base config we can reuse for each cloned module.
   xla::HloModuleConfig base_cfg = module.config();
 
   for (xla::HloInstruction* instr : order) {
+    // Skip parameters if you don't want trivial "identity" fragments.
+    // For now, let's keep *all* instructions including params, so
+    // you can see every step. You can easily filter on opcode.
     std::string mod_name = absl::StrCat("frag_", instr->name());
 
     xla::HloModuleConfig cfg(base_cfg);
     auto frag = std::make_unique<xla::HloModule>(mod_name, cfg);
+
+    xla::HloComputation::Builder b(absl::StrCat(mod_name, "_entry"));
+
+    // Map from original operand -> new parameter instruction in this fragment.
+    absl::flat_hash_map<const xla::HloInstruction*, xla::HloInstruction*>
+        op_to_param;
+
+    std::vector<xla::HloInstruction*> new_operands;
+    new_operands.reserve(instr->operand_count());
+    std::vector<const xla::HloInstruction*> orig_ops;
+    orig_ops.reserve(instr->operand_count());
+
+    int param_idx = 0;
+    for (xla::HloInstruction* op : instr->operands()) {
+      // One parameter per operand, with the same shape as the operand.
+      auto* p = b.AddInstruction(xla::HloInstruction::CreateParameter(
+          param_idx, op->shape(),
+          absl::StrCat("p", param_idx, "_for_", instr->name())));
+      op_to_param[op] = p;
+      new_operands.push_back(p);
+      orig_ops.push_back(op);
+      ++param_idx;
+    }
+
+    // Now clone this instruction using the new operands as inputs.
+    // CloneWithNewOperands preserves opcode + attributes.
+    xla::HloInstruction* cloned =
+        b.AddInstruction(instr->CloneWithNewOperands(instr->shape(),
+                                                     new_operands));
+
+    // Build computation with 'cloned' as ROOT.
+    xla::HloComputation* comp =
+        frag->AddEntryComputation(b.Build(cloned));
+    (void)comp;  // silence unused warning if not used
+
+    InstructionFragment info;
+    info.module = std::move(frag);
+    info.original_instr = instr;
+    info.original_operands = std::move(orig_ops);
+
+    fragments.push_back(std::move(info));
   }
+
+  return fragments;
 }
 
 // Compile each fragment with maybe different feature sets.
@@ -239,6 +289,10 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
 
   TF_ASSIGN_OR_RETURN(std::vector<InstructionFragment> frags,
                       SplitModulePerInstruction(*module));
+
+  for (auto& frag : frags) {
+    std::cout << "Fragment for instruction: " << frag.original_instr->name() << std::endl;
+  }
 
   TF_ASSIGN_OR_RETURN(std::vector<CompiledFragment> compiled_frags,
                        CompileFragments(frags, "skylake-avx512", features_str));
