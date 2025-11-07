@@ -1,6 +1,11 @@
 // hlo_aot.cc
+#include <chrono>
+#include <cmath>
 #include <fstream>
+#include <functional>
+#include <iostream>
 #include <sstream>
+#include <vector>
 #include "absl/strings/string_view.h"
 #include "absl/strings/str_split.h"
 #include "llvm/Support/CodeGen.h"  // For Reloc
@@ -32,8 +37,6 @@
 #include "xla/tests/literal_test_util.h"
 #include "xla/xla_data.pb.h"
 #include "xla/error_spec.h"
-
-#include <iostream>
 
 using namespace xla;
 using xla::HloModule;
@@ -187,11 +190,10 @@ absl::Status RunFragmentsSequentially(
     const xla::HloModule& original,
     const std::vector<CompiledFragment>& compiled_frags,
     const std::vector<std::unique_ptr<xla::PjRtBuffer>>& entry_param_buffers,
-    xla::PjRtClient* client) {
+    xla::PjRtClient* client,
+    std::shared_ptr<xla::Literal>* literal_out) {
 
   xla::PjRtDevice* device = client->devices().front();
-  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace* memory_space,
-                      device->default_memory_space());
 
   // Map original HloInstruction* -> computed device buffer.
   absl::flat_hash_map<const xla::HloInstruction*,
@@ -257,11 +259,77 @@ absl::Status RunFragmentsSequentially(
   }
 
   // Optionally convert ROOT buffer to Literal for correctness checking:
-  TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> out_lit,
-                      it->second->ToLiteralSync());
-  // Compare vs reference, etc.
+  if (literal_out != nullptr) {
+    TF_ASSIGN_OR_RETURN(*literal_out, it->second->ToLiteralSync());
+  }
 
   return absl::OkStatus();
+}
+
+struct BenchmarkStats {
+  double mean_ms = 0.0;
+  double stddev_ms = 0.0;
+  double ci_half_width_ms = 0.0;
+  int runs = 0;
+};
+
+BenchmarkStats ComputeBenchmarkStats(const std::vector<double>& samples) {
+  BenchmarkStats stats;
+  if (samples.empty()) {
+    return stats;
+  }
+  stats.runs = static_cast<int>(samples.size());
+  double sum = 0.0;
+  for (double v : samples) {
+    sum += v;
+  }
+  stats.mean_ms = sum / samples.size();
+  if (samples.size() > 1) {
+    double variance = 0.0;
+    for (double v : samples) {
+      double delta = v - stats.mean_ms;
+      variance += delta * delta;
+    }
+    variance /= (samples.size() - 1);
+    stats.stddev_ms = std::sqrt(variance);
+    stats.ci_half_width_ms =
+        1.96 * stats.stddev_ms / std::sqrt(static_cast<double>(samples.size()));
+  }
+  return stats;
+}
+
+absl::StatusOr<BenchmarkStats> BenchmarkExecution(
+    absl::string_view label,
+    const std::function<absl::Status()>& run_once) {
+  constexpr int kMaxRuns = 1000;
+  std::vector<double> samples;
+  samples.reserve(kMaxRuns);
+
+  for (int i = 0; i < kMaxRuns; ++i) {
+    auto start = std::chrono::high_resolution_clock::now();
+    TF_RETURN_IF_ERROR(run_once());
+    auto end = std::chrono::high_resolution_clock::now();
+    double elapsed_ms =
+        std::chrono::duration<double, std::milli>(end - start).count();
+    std::cout << label << " run " << (i + 1) << ": " << elapsed_ms << " ms"
+              << std::endl;
+    samples.push_back(elapsed_ms);
+    if (samples.size() < 2) {
+      continue;
+    }
+    BenchmarkStats stats = ComputeBenchmarkStats(samples);
+    double relative_ci =
+        stats.ci_half_width_ms / std::max(stats.mean_ms, 1e-12);
+    if (relative_ci <= 0.05) {
+      std::cout << "Achieved 95% CI within 5% of mean for " << label
+                << " after " << stats.runs << " runs." << std::endl;
+      return stats;
+    }
+  }
+
+  std::cout << "Reached max runs for " << label
+            << ". Reporting best-effort stats." << std::endl;
+  return ComputeBenchmarkStats(samples);
 }
 
 absl::Status RunAotCompilationExample(std::string hlo_file, std::string features_str, std::string io_prefix) {
@@ -284,10 +352,6 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
 
   TF_ASSIGN_OR_RETURN(std::vector<InstructionFragment> frags,
                       SplitModulePerInstruction(*module));
-
-  for (auto& frag : frags) {
-    std::cout << "Fragment for instruction: " << frag.original_instr->name() << std::endl;
-  }
 
   xla::CpuClientOptions client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
@@ -327,8 +391,25 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
     arg_ptrs.push_back(buf.get());
   }
 
-  TF_RETURN_IF_ERROR(
-      RunFragmentsSequentially(*module, compiled_frags, args_buffers, client.get()));
+  std::string ref_path = absl::StrCat(io_prefix, "/output_0.ref.litpb");
+  TF_ASSIGN_OR_RETURN(xla::Literal ref_lit,
+                      LoadLiteralFromProtoFile(ref_path));
+
+  std::shared_ptr<xla::Literal> fragmented_out;
+  TF_RETURN_IF_ERROR(RunFragmentsSequentially(
+      *module, compiled_frags, args_buffers, client.get(), &fragmented_out));
+  EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *fragmented_out,
+                                                ErrorSpec(1e-5, 1e-5)));
+  std::cout << "Fragmented execution matches reference." << std::endl;
+
+  auto run_fragmented_once = [&]() -> absl::Status {
+    return RunFragmentsSequentially(*module, compiled_frags, args_buffers,
+                                    client.get(), /*literal_out=*/nullptr);
+  };
+
+  TF_ASSIGN_OR_RETURN(
+      BenchmarkStats fragmented_stats,
+      BenchmarkExecution("Fragmented execution", run_fragmented_once));
 
   std::unique_ptr<xla::AotCompilationOptions> aot_options;
 
@@ -364,68 +445,41 @@ absl::Status RunAotCompilationExample(std::string hlo_file, std::string features
   execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
 
   TF_ASSIGN_OR_RETURN(
-    auto result_buffers,
-    executable->ExecuteSharded(arg_ptrs, device, execute_options));
-
+      auto result_buffers,
+      executable->ExecuteSharded(arg_ptrs, device, execute_options));
   TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
+  TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
+                      result_buffers[0]->ToLiteralSync());
+  EXPECT_TRUE(
+      xla::LiteralTestUtil::NearOrEqual(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5)));
+  std::cout << "Full executable output matches reference." << std::endl;
 
-  TF_ASSIGN_OR_RETURN(
-    std::shared_ptr<xla::Literal> out_lit,
-    result_buffers[0]->ToLiteralSync());
-
-  // Load reference from JAX
-  std::string ref_path =
-      absl::StrCat(io_prefix, "/output_0.ref.litpb");
-  TF_ASSIGN_OR_RETURN(xla::Literal ref_lit,
-                      LoadLiteralFromProtoFile(ref_path));
-
-  EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *out_lit, ErrorSpec(1e-5, 1e-5)));
-
-
-  std::cout << "Output matches reference." << std::endl;
-
-  std::vector<std::unique_ptr<PjRtBuffer>> results;
-
-  auto run_benchmark_once = [&]() -> absl::Status {
-    results =
-        executable->ExecuteSharded(arg_ptrs, device, execute_options)
-            .value();
-    CHECK_OK(results[0]->GetReadyFuture().Await());
+  auto run_full_once = [&]() -> absl::Status {
+    TF_ASSIGN_OR_RETURN(
+        auto iteration_buffers,
+        executable->ExecuteSharded(arg_ptrs, device, execute_options));
+    TF_RETURN_IF_ERROR(iteration_buffers[0]->GetReadyFuture().Await());
     return absl::OkStatus();
   };
 
-  // Run benchmark multiple times to achieve 95% CI within 5% of mean
-  const int max_runs = 1000;  // Safety limit
-  std::vector<double> times;
-  times.reserve(max_runs);
+  TF_ASSIGN_OR_RETURN(
+      BenchmarkStats full_stats,
+      BenchmarkExecution("Full execution", run_full_once));
 
-  for (int i = 0; i < max_runs; ++i) {
-    auto start = std::chrono::high_resolution_clock::now();
-    TF_RETURN_IF_ERROR(run_benchmark_once());
-    auto end = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> diff = end - start;
-    times.push_back(diff.count());
-    std::cout<< "Run " << i+1 << ": " << diff.count() * 1000 << " ms" <<std::endl;
+  auto print_summary = [](absl::string_view label,
+                          const BenchmarkStats& stats) {
+    std::cout << label << " mean: " << stats.mean_ms
+              << " ms (stddev " << stats.stddev_ms << " ms, 95% CI +/-"
+              << stats.ci_half_width_ms << " ms over " << stats.runs
+              << " runs)" << std::endl;
+  };
 
-    // Compute mean and std dev
-    double sum = 0.0;
-    for (double t : times) sum += t;
-    double mean = sum / times.size();
-    double var = 0.0;
-    for (double t : times) var += (t - mean) * (t - mean);
-    double std_dev = std::sqrt(var / (times.size() - 1));
-    double ci_half_width = 1.96 * std_dev / std::sqrt(times.size());
-    double relative_ci = ci_half_width / mean;
-
-    if (relative_ci <= 0.05) {  // 5% of mean
-      std::cout << "Achieved 95% CI within 5% of mean after " << times.size() << " runs." << std::endl;
-      std::cout << "Mean time: " << mean * 1000 << " ms, Std dev: " << std_dev * 1000 << " ms, CI half-width: " << ci_half_width * 1000 << " ms" << std::endl;
-      break;
-    }
-  }
-
-  if (times.size() == max_runs) {
-    std::cout << "Reached max runs without achieving CI target." << std::endl;
+  print_summary("Fragmented execution", fragmented_stats);
+  print_summary("Full execution", full_stats);
+  if (fragmented_stats.mean_ms > 0.0) {
+    std::cout << "Full / fragmented mean time ratio: "
+              << full_stats.mean_ms / fragmented_stats.mean_ms << "x"
+              << std::endl;
   }
 
   return absl::OkStatus();
