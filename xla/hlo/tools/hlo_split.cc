@@ -8,6 +8,7 @@
 #include <sstream>
 #include <optional>
 #include <vector>
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
 #include "absl/strings/str_join.h"
@@ -55,6 +56,7 @@ struct InstructionFragment {
   std::vector<const xla::HloInstruction*> produced_instructions;
   std::vector<const xla::HloInstruction*> external_operands;
   std::string description;
+  int chunk_index = -1;
 };
 
 // Small holder tying a fragment to its compiled executable.
@@ -63,6 +65,40 @@ struct CompiledFragment {
   std::unique_ptr<xla::PjRtLoadedExecutable> exec;
   std::string feature_set;
   int chunk_size = 0;
+};
+
+class FeaturePolicy {
+ public:
+  explicit FeaturePolicy(std::vector<std::string> tokens)
+      : tokens_(std::move(tokens)) {
+    if (tokens_.empty()) {
+      tokens_.push_back("");
+    }
+    absl::flat_hash_set<std::string> seen;
+    for (const auto& token : tokens_) {
+      if (seen.insert(token).second) {
+        unique_tokens_.push_back(token);
+      }
+    }
+  }
+
+  const std::string& SelectForChunk(int chunk_index) const {
+    int idx = chunk_index % tokens_.size();
+    if (idx < 0) {
+      idx += tokens_.size();
+    }
+    return tokens_[idx];
+  }
+
+  const std::vector<std::string>& tokens() const { return tokens_; }
+  const std::vector<std::string>& unique_tokens() const {
+    return unique_tokens_;
+  }
+  bool IsSingleBackend() const { return unique_tokens_.size() == 1; }
+
+ private:
+  std::vector<std::string> tokens_;
+  std::vector<std::string> unique_tokens_;
 };
 
 absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
@@ -190,6 +226,7 @@ absl::StatusOr<InstructionFragment> BuildFragmentFromChunk(
   info.external_operands = std::move(external_operands);
   info.description =
       absl::StrCat("chunk#", chunk_index, "_size=", chunk_instructions.size());
+  info.chunk_index = chunk_index;
   return info;
 }
 
@@ -244,7 +281,8 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size) {
 // by index or opcode.
 absl::StatusOr<std::vector<CompiledFragment>>
 CompileFragments(const std::vector<InstructionFragment>& fragments,
-                 const std::string& cpu_name, const std::string& features,
+                 const std::string& cpu_name,
+                 const FeaturePolicy& feature_policy,
                  int chunk_size, xla::PjRtCpuClient* cpu_client) {
 
   xla::CompileOptions compile_options;
@@ -253,6 +291,7 @@ CompileFragments(const std::vector<InstructionFragment>& fragments,
   compiled.reserve(fragments.size());
 
   for (const auto& frag : fragments) {
+    const std::string& features = feature_policy.SelectForChunk(frag.chunk_index);
     xla::XlaComputation computation(frag.module->ToProto());
 
     auto entry_point = std::string(frag.module->entry_computation()->name());
@@ -442,22 +481,32 @@ absl::StatusOr<BenchmarkStats> BenchmarkExecution(
   return ComputeBenchmarkStats(samples);
 }
 
-std::vector<std::string> ParseFeatureSets(const std::string& raw) {
-  std::vector<std::string> sets;
+std::vector<std::vector<std::string>> ParseFeatureExperiments(
+    const std::string& raw) {
+  std::vector<std::vector<std::string>> experiments;
   if (raw.empty()) {
-    sets.push_back("");
-    return sets;
+    experiments.push_back({""});
+    return experiments;
   }
-  for (absl::string_view part : absl::StrSplit(raw, ';')) {
-    std::string cleaned = std::string(absl::StripAsciiWhitespace(part));
-    if (!cleaned.empty()) {
-      sets.push_back(cleaned);
+  for (absl::string_view exp : absl::StrSplit(raw, ';')) {
+    std::string cleaned_exp = std::string(absl::StripAsciiWhitespace(exp));
+    if (cleaned_exp.empty()) {
+      continue;
     }
+    std::vector<std::string> tokens;
+    for (absl::string_view token : absl::StrSplit(cleaned_exp, '|')) {
+      std::string trimmed = std::string(absl::StripAsciiWhitespace(token));
+      tokens.push_back(trimmed);
+    }
+    if (tokens.empty()) {
+      tokens.push_back("");
+    }
+    experiments.push_back(std::move(tokens));
   }
-  if (sets.empty()) {
-    sets.push_back("");
+  if (experiments.empty()) {
+    experiments.push_back({""});
   }
-  return sets;
+  return experiments;
 }
 
 std::string MaterializeFeatureString(
@@ -475,6 +524,59 @@ std::string MaterializeFeatureString(
     return absl::StrJoin(enabled, ",");
   }
   return token;
+}
+
+absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
+    const std::string& features, const xla::HloModule& module,
+    const xla::CompileOptions& compile_options,
+    const std::vector<PjRtBuffer*>& arg_ptrs, xla::PjRtDevice* device,
+    xla::PjRtCpuClient* cpu_client, const xla::Literal& ref_lit) {
+  auto aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
+      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
+      /*features=*/features,
+      /*entry_point_name=*/"main.1",
+      /*relocation_model=*/
+      xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
+
+  xla::XlaComputation computation(module.ToProto());
+  TF_ASSIGN_OR_RETURN(
+      std::unique_ptr<xla::PjRtLoadedExecutable> executable,
+      cpu_client->CompileAheadOfTimeAndLoad(computation, compile_options,
+                                            *aot_options));
+
+  ExecuteOptions execute_options;
+  execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
+
+  TF_ASSIGN_OR_RETURN(
+      auto result_buffers,
+      executable->ExecuteSharded(arg_ptrs, device, execute_options));
+  TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
+  TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
+                      result_buffers[0]->ToLiteralSync());
+  EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *full_out,
+                                                ErrorSpec(1e-5, 1e-5)));
+  std::cout << "Full execution (features=" << features
+            << ") output matches reference." << std::endl;
+
+  auto run_full_once = [&]() -> absl::Status {
+    TF_ASSIGN_OR_RETURN(
+        auto iteration_buffers,
+        executable->ExecuteSharded(arg_ptrs, device, execute_options));
+    TF_RETURN_IF_ERROR(iteration_buffers[0]->GetReadyFuture().Await());
+    return absl::OkStatus();
+  };
+
+  return BenchmarkExecution(
+      absl::StrCat("Full (features=", features, ")"), run_full_once);
+}
+
+std::string DescribePolicy(const FeaturePolicy& policy) {
+  if (policy.IsSingleBackend()) {
+    const std::string& token = policy.unique_tokens().front();
+    return token.empty() ? std::string("<default>") : token;
+  }
+  return absl::StrCat("cycle(",
+                      absl::StrJoin(policy.tokens(), ", "), ")");
 }
 
 absl::Status RunAotCompilationExample(std::string hlo_file,
@@ -552,7 +654,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     chunk_sizes.push_back(size);
   }
 
-  auto feature_sets = ParseFeatureSets(features_str);
+  auto feature_experiments = ParseFeatureExperiments(features_str);
   auto print_summary = [](absl::string_view label,
                           const BenchmarkStats& stats) {
     std::cout << label << " mean: " << stats.mean_ms
@@ -561,13 +663,31 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
               << std::endl;
   };
 
-  for (const std::string& feature_token : feature_sets) {
-    std::string materialized_features =
-        MaterializeFeatureString(feature_token, host_machine_features);
-    std::cout << "=== Feature set: "
-              << (materialized_features.empty() ? std::string("<default>")
-                                                : materialized_features)
-              << " ===" << std::endl;
+  for (const auto& raw_tokens : feature_experiments) {
+    std::vector<std::string> materialized_tokens;
+    materialized_tokens.reserve(raw_tokens.size());
+    for (const std::string& token : raw_tokens) {
+      materialized_tokens.push_back(
+          MaterializeFeatureString(token, host_machine_features));
+    }
+    FeaturePolicy policy(std::move(materialized_tokens));
+    std::cout << "=== Feature policy: " << DescribePolicy(policy) << " ==="
+              << std::endl;
+
+    absl::flat_hash_map<std::string, BenchmarkStats> full_stats_map;
+    for (const std::string& token : policy.unique_tokens()) {
+      TF_ASSIGN_OR_RETURN(
+          BenchmarkStats stats,
+          BenchmarkFullExecution(token, *module, compile_options, arg_ptrs,
+                                 device, cpu_client, ref_lit));
+      full_stats_map[token] = stats;
+      print_summary(
+          absl::StrCat("Full execution (features=", token, ")"), stats);
+    }
+    const BenchmarkStats* single_full_stats =
+        policy.IsSingleBackend()
+            ? &full_stats_map[policy.unique_tokens().front()]
+            : nullptr;
 
     struct FragmentBenchmarkResult {
       int chunk_size;
@@ -583,8 +703,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       }
       TF_ASSIGN_OR_RETURN(auto compiled_frags,
                           CompileFragments(fragments, "skylake-avx512",
-                                           materialized_features, chunk_size,
-                                           cpu_client));
+                                           policy, chunk_size, cpu_client));
 
       std::shared_ptr<xla::Literal> fragmented_out;
       TF_RETURN_IF_ERROR(RunFragmentsSequentially(
@@ -601,61 +720,24 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       TF_ASSIGN_OR_RETURN(
           BenchmarkStats stats,
           BenchmarkExecution(
-              absl::StrCat("Fragmented (features=", materialized_features,
+              absl::StrCat("Fragmented (policy=", DescribePolicy(policy),
                            ", chunk=", chunk_size, ")"),
               run_fragmented_once));
       fragment_results.push_back({chunk_size, stats});
     }
 
-    auto aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
-        /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"skylake-avx512",
-        /*features=*/materialized_features,
-        /*entry_point_name=*/"main.1",
-        /*relocation_model=*/
-        xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
-
-    xla::XlaComputation computation(module->ToProto());
-    std::unique_ptr<xla::PjRtLoadedExecutable> executable;
-    TF_ASSIGN_OR_RETURN(executable,
-                        cpu_client->CompileAheadOfTimeAndLoad(
-                            computation, compile_options, *aot_options));
-
-    ExecuteOptions execute_options;
-    execute_options.execution_mode =
-        ExecuteOptions::ExecutionMode::kSynchronous;
-
-    TF_ASSIGN_OR_RETURN(auto result_buffers,
-                        executable->ExecuteSharded(arg_ptrs, device,
-                                                   execute_options));
-    TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
-    TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
-                        result_buffers[0]->ToLiteralSync());
-    EXPECT_TRUE(xla::LiteralTestUtil::NearOrEqual(ref_lit, *full_out,
-                                                  ErrorSpec(1e-5, 1e-5)));
-
-    auto run_full_once = [&]() -> absl::Status {
-      TF_ASSIGN_OR_RETURN(auto iteration_buffers,
-                          executable->ExecuteSharded(arg_ptrs, device,
-                                                     execute_options));
-      TF_RETURN_IF_ERROR(iteration_buffers[0]->GetReadyFuture().Await());
-      return absl::OkStatus();
-    };
-
-    TF_ASSIGN_OR_RETURN(BenchmarkStats full_stats,
-                        BenchmarkExecution(
-                            absl::StrCat("Full (features=", materialized_features,
-                                         ")"),
-                            run_full_once));
-
-    print_summary("Full execution", full_stats);
     for (const auto& frag_result : fragment_results) {
       print_summary(absl::StrCat("Fragmented chunk=", frag_result.chunk_size),
                     frag_result.stats);
-      if (frag_result.stats.mean_ms > 0.0) {
+      if (single_full_stats && frag_result.stats.mean_ms > 0.0) {
         std::cout << "  full/fragment mean ratio (chunk "
                   << frag_result.chunk_size << "): "
-                  << full_stats.mean_ms / frag_result.stats.mean_ms << "x"
-                  << std::endl;
+                  << single_full_stats->mean_ms / frag_result.stats.mean_ms
+                  << "x" << std::endl;
+      } else if (!policy.IsSingleBackend()) {
+        std::cout << "  full/fragment mean ratio (chunk "
+                  << frag_result.chunk_size
+                  << "): N/A (multi-backend policy)" << std::endl;
       }
     }
   }
