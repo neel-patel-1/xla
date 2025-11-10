@@ -168,7 +168,6 @@ cc_binary(
         "//xla/service:service",
         "//xla/service/cpu:cpu_compiler",
         "//xla/service/cpu:cpu_runtime",
-        "//xla/service:compile_only_service",
         "//xla/pjrt/proto:compile_options_proto_cc",
         "//xla/pjrt/proto:pjrt_value_type_proto_cc",  # Add this for pjrt_value_type.pb.h
         "//xla/pjrt/proto:pjrt_device_dimensions_proto_cc",
@@ -196,7 +195,6 @@ cc_binary(
         "//xla/service:service",
         "//xla/service/cpu:cpu_compiler",
         "//xla/service/cpu:cpu_runtime",
-        "//xla/service:compile_only_service",
         "//xla/pjrt/proto:compile_options_proto_cc",
         "//xla/pjrt/proto:pjrt_value_type_proto_cc",  # Add this for pjrt_value_type.pb.h
         "//xla/pjrt/proto:pjrt_device_dimensions_proto_cc",
@@ -208,6 +206,7 @@ cc_binary(
         "//xla/pjrt/cpu:cpu_client",
         "//xla/pjrt:async_work_runner",
         "//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "//xla/pjrt/plugin/xla_gpu:xla_gpu_pjrt_client",
         "//xla/hlo/testlib:verified_hlo_module",
         "//xla/tests:test_utils",
         "//xla/tests:literal_test_util",

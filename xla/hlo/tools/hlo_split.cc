@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -11,6 +12,8 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/strings/ascii.h"
+#include "absl/strings/match.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/string_view.h"
 #include "absl/strings/str_split.h"
@@ -18,7 +21,6 @@
 #include "absl/types/span.h"
 #include "llvm/Support/CodeGen.h"  // For Reloc
 #include "xla/hlo/parser/hlo_parser.h"
-#include "xla/service/compile_only_service.h"
 #include "xla/service/cpu/cpu_aot_compilation_result.h"
 #include "xla/service/compiler.h"
 #include "xla/stream_executor/platform_manager.h"  // Added for PlatformManager
@@ -27,6 +29,7 @@
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/cpu/cpu_client.h"
+#include "xla/pjrt/plugin/xla_gpu/xla_gpu_pjrt_client.h"
 #include "xla/hlo/builder/xla_computation.h"
 #include "xla/pjrt/plugin/xla_cpu/xla_cpu_pjrt_client.h"
 #include "xla/tsl/platform/statusor.h"  // Add for TF_ASSIGN_OR_RETURN
@@ -60,30 +63,61 @@ struct InstructionFragment {
   int chunk_index = -1;
 };
 
+enum class BackendKind { kCpu, kGpu };
+
+struct BackendToken {
+  BackendKind kind = BackendKind::kCpu;
+  std::string spec;
+
+  std::string DebugString() const {
+    switch (kind) {
+      case BackendKind::kCpu:
+        if (spec.empty()) {
+          return "cpu<default>";
+        }
+        return absl::StrCat("cpu(", spec, ")");
+      case BackendKind::kGpu:
+        if (spec.empty()) {
+          return "gpu";
+        }
+        return absl::StrCat("gpu(", spec, ")");
+    }
+    return "unknown";
+  }
+};
+
+bool operator==(const BackendToken& lhs, const BackendToken& rhs) {
+  return lhs.kind == rhs.kind && lhs.spec == rhs.spec;
+}
+
 // Small holder tying a fragment to its compiled executable.
 struct CompiledFragment {
   InstructionFragment frag;
   std::unique_ptr<xla::PjRtLoadedExecutable> exec;
   std::string feature_set;
   int chunk_size = 0;
+  BackendToken backend;
+  xla::PjRtClient* client = nullptr;
+  xla::PjRtDevice* device = nullptr;
 };
 
 class FeaturePolicy {
  public:
-  explicit FeaturePolicy(std::vector<std::string> tokens)
+  explicit FeaturePolicy(std::vector<BackendToken> tokens)
       : tokens_(std::move(tokens)) {
     if (tokens_.empty()) {
-      tokens_.push_back("");
+      tokens_.push_back(BackendToken{BackendKind::kCpu, ""});
     }
     absl::flat_hash_set<std::string> seen;
     for (const auto& token : tokens_) {
-      if (seen.insert(token).second) {
+      std::string key = token.DebugString();
+      if (seen.insert(key).second) {
         unique_tokens_.push_back(token);
       }
     }
   }
 
-  const std::string& SelectForChunk(int chunk_index) const {
+  const BackendToken& SelectForChunk(int chunk_index) const {
     int idx = chunk_index % tokens_.size();
     if (idx < 0) {
       idx += tokens_.size();
@@ -91,16 +125,106 @@ class FeaturePolicy {
     return tokens_[idx];
   }
 
-  const std::vector<std::string>& tokens() const { return tokens_; }
-  const std::vector<std::string>& unique_tokens() const {
+  const std::vector<BackendToken>& tokens() const { return tokens_; }
+  const std::vector<BackendToken>& unique_tokens() const {
     return unique_tokens_;
   }
   bool IsSingleBackend() const { return unique_tokens_.size() == 1; }
 
  private:
-  std::vector<std::string> tokens_;
-  std::vector<std::string> unique_tokens_;
+  std::vector<BackendToken> tokens_;
+  std::vector<BackendToken> unique_tokens_;
 };
+
+struct ParameterState {
+  const xla::Literal* literal = nullptr;
+  std::unique_ptr<xla::PjRtBuffer> buffer;
+};
+
+absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> UploadLiteralToDevice(
+    const xla::Literal& literal, xla::PjRtDevice* device) {
+  if (device == nullptr) {
+    return absl::InvalidArgumentError("Target device is null");
+  }
+  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace * memory_space,
+                      device->default_memory_space());
+  TF_ASSIGN_OR_RETURN(auto buffer,
+                      device->client()->BufferFromHostLiteral(literal,
+                                                              memory_space));
+  TF_RETURN_IF_ERROR(buffer->GetReadyFuture().Await());
+  return buffer;
+}
+
+absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CopyBufferBetweenClients(
+    xla::PjRtBuffer* source, xla::PjRtDevice* target_device) {
+  if (source == nullptr) {
+    return absl::InvalidArgumentError("Source buffer is null");
+  }
+  TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> literal,
+                      source->ToLiteralSync());
+  return UploadLiteralToDevice(*literal, target_device);
+}
+
+absl::StatusOr<xla::PjRtBuffer*> EnsureBufferOnDevice(
+    std::unique_ptr<xla::PjRtBuffer>& buffer, xla::PjRtDevice* target_device,
+    const xla::Literal* literal_fallback) {
+  if (target_device == nullptr) {
+    return absl::InvalidArgumentError("Target device is null");
+  }
+  if (buffer && buffer->device() == target_device) {
+    return buffer.get();
+  }
+  if (buffer) {
+    TF_ASSIGN_OR_RETURN(auto transferred,
+                        CopyBufferBetweenClients(buffer.get(), target_device));
+    buffer = std::move(transferred);
+    return buffer.get();
+  }
+  if (literal_fallback != nullptr) {
+    TF_ASSIGN_OR_RETURN(buffer, UploadLiteralToDevice(*literal_fallback,
+                                                      target_device));
+    return buffer.get();
+  }
+  return absl::InvalidArgumentError(
+      "No literal fallback or buffer available for transfer");
+}
+
+absl::StatusOr<xla::PjRtDevice*> GetDefaultDevice(xla::PjRtClient* client,
+                                                  absl::string_view label) {
+  if (client == nullptr) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Requested ", label, " device but client is null"));
+  }
+  const auto& devices = client->devices();
+  if (devices.empty()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("No devices available for ", label, " backend"));
+  }
+  return devices.front();
+}
+
+absl::StatusOr<std::vector<ParameterState>> InitializeParameterStates(
+    absl::Span<const xla::Literal> literals, xla::PjRtDevice* seed_device) {
+  std::vector<ParameterState> states(literals.size());
+  for (int i = 0; i < literals.size(); ++i) {
+    states[i].literal = &literals[i];
+    TF_ASSIGN_OR_RETURN(states[i].buffer,
+                        UploadLiteralToDevice(literals[i], seed_device));
+  }
+  return states;
+}
+
+absl::StatusOr<std::vector<std::unique_ptr<xla::PjRtBuffer>>>
+PrepareArgumentBuffers(absl::Span<const xla::Literal> literals,
+                       xla::PjRtDevice* device) {
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> buffers;
+  buffers.reserve(literals.size());
+  for (const xla::Literal& literal : literals) {
+    TF_ASSIGN_OR_RETURN(auto buffer, UploadLiteralToDevice(literal, device));
+    buffers.push_back(std::move(buffer));
+  }
+  return buffers;
+}
 
 absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   std::string data;
@@ -284,7 +408,8 @@ absl::StatusOr<std::vector<CompiledFragment>>
 CompileFragments(const std::vector<InstructionFragment>& fragments,
                  const std::string& cpu_name,
                  const FeaturePolicy& feature_policy,
-                 int chunk_size, xla::PjRtCpuClient* cpu_client) {
+                 int chunk_size, xla::PjRtCpuClient* cpu_client,
+                 xla::PjRtClient* gpu_client) {
 
   xla::CompileOptions compile_options;
 
@@ -292,22 +417,40 @@ CompileFragments(const std::vector<InstructionFragment>& fragments,
   compiled.reserve(fragments.size());
 
   for (const auto& frag : fragments) {
-    const std::string& features = feature_policy.SelectForChunk(frag.chunk_index);
+    const BackendToken& backend =
+        feature_policy.SelectForChunk(frag.chunk_index);
     xla::XlaComputation computation(frag.module->ToProto());
+    std::unique_ptr<xla::PjRtLoadedExecutable> exec;
+    xla::PjRtDevice* device = nullptr;
 
-    auto entry_point = std::string(frag.module->entry_computation()->name());
-    auto aot_opts = xla::cpu::CpuAotCompilationOptions(
-        /*triple=*/"x86_64-unknown-linux-gnu",
-        /*cpu_name=*/cpu_name,
-        /*features=*/features,
-        /*entry_point_name=*/entry_point,
-        /*relocation_model=*/
-        xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
+    if (backend.kind == BackendKind::kCpu) {
+      const std::string& features = backend.spec;
+      auto entry_point = std::string(frag.module->entry_computation()->name());
+      auto aot_opts = xla::cpu::CpuAotCompilationOptions(
+          /*triple=*/"x86_64-unknown-linux-gnu",
+          /*cpu_name=*/cpu_name,
+          /*features=*/features,
+          /*entry_point_name=*/entry_point,
+          /*relocation_model=*/
+          xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
 
-    TF_ASSIGN_OR_RETURN(
-        std::unique_ptr<xla::PjRtLoadedExecutable> exec,
-        cpu_client->CompileAheadOfTimeAndLoad(
-            computation, compile_options, aot_opts));
+      TF_ASSIGN_OR_RETURN(
+          auto compiled_exec,
+          cpu_client->CompileAheadOfTimeAndLoad(computation,
+                                                compile_options, aot_opts));
+      exec = std::move(compiled_exec);
+      TF_ASSIGN_OR_RETURN(device, GetDefaultDevice(cpu_client, "CPU"));
+    } else {
+      if (gpu_client == nullptr) {
+        return absl::InvalidArgumentError(
+            "GPU backend requested but GPU client is unavailable");
+      }
+      TF_ASSIGN_OR_RETURN(auto compiled_exec,
+                          gpu_client->CompileAndLoad(computation,
+                                                      compile_options));
+      exec = std::move(compiled_exec);
+      TF_ASSIGN_OR_RETURN(device, GetDefaultDevice(gpu_client, "GPU"));
+    }
 
     CompiledFragment cf;
     InstructionFragment stored;
@@ -318,8 +461,13 @@ CompileFragments(const std::vector<InstructionFragment>& fragments,
     stored.description = frag.description;
     cf.frag = std::move(stored);
     cf.exec = std::move(exec);
-    cf.feature_set = features;
+    cf.feature_set = backend.spec;
     cf.chunk_size = chunk_size;
+    cf.backend = backend;
+    cf.client = (backend.kind == BackendKind::kCpu)
+                    ? static_cast<xla::PjRtClient*>(cpu_client)
+                    : gpu_client;
+    cf.device = device;
     compiled.push_back(std::move(cf));
   }
 
@@ -329,28 +477,12 @@ CompileFragments(const std::vector<InstructionFragment>& fragments,
 absl::Status RunFragmentsSequentially(
     const xla::HloModule& original,
     const std::vector<CompiledFragment>& compiled_frags,
-    const std::vector<std::unique_ptr<xla::PjRtBuffer>>& entry_param_buffers,
-    xla::PjRtClient* client,
+    std::vector<ParameterState>* entry_params,
     std::shared_ptr<xla::Literal>* literal_out) {
-
-  xla::PjRtDevice* device = client->devices().front();
-
-  // Map original HloInstruction* -> computed device buffer.
   absl::flat_hash_map<const xla::HloInstruction*,
                       std::unique_ptr<xla::PjRtBuffer>>
       value_map;
-
-  // Seed map with original parameters: param(i) -> entry_param_buffers[i]
   const xla::HloComputation* entry = original.entry_computation();
-  for (xla::HloInstruction* instr : entry->parameter_instructions()) {
-    // Clone the buffer pointer (just move a unique_ptr if you own them).
-    // Here we assume entry_param_buffers already live long enough and
-    // we just *point* to them:
-    // (If you want ownership, wrap them differently.)
-    // We'll store raw pointers for simplicity:
-    // value_map[instr] = <PjRtBuffer*>;
-    // In a real implementation, choose a consistent ownership model.
-  }
 
   xla::ExecuteOptions exec_opts;
   exec_opts.execution_mode = xla::ExecuteOptions::ExecutionMode::kSynchronous;
@@ -358,6 +490,7 @@ absl::Status RunFragmentsSequentially(
   // Execute fragments in the same order as they were generated.
   for (const auto& cf : compiled_frags) {
     const InstructionFragment& frag = cf.frag;
+    xla::PjRtDevice* target_device = cf.device;
 
     // 1) Build the arg list for this fragment from value_map and params.
     std::vector<xla::PjRtBuffer*> arg_ptrs;
@@ -366,7 +499,16 @@ absl::Status RunFragmentsSequentially(
     for (const xla::HloInstruction* op : frag.external_operands) {
       if (op->opcode() == xla::HloOpcode::kParameter) {
         int param_idx = op->parameter_number();
-        arg_ptrs.push_back(entry_param_buffers[param_idx].get());
+        if (param_idx < 0 ||
+            param_idx >= static_cast<int>(entry_params->size())) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Invalid parameter index ", param_idx));
+        }
+        ParameterState& state = (*entry_params)[param_idx];
+        TF_ASSIGN_OR_RETURN(
+            xla::PjRtBuffer * buf,
+            EnsureBufferOnDevice(state.buffer, target_device, state.literal));
+        arg_ptrs.push_back(buf);
       } else {
         // internal value, must have been produced by an earlier fragment
         auto it = value_map.find(op);
@@ -375,14 +517,18 @@ absl::Status RunFragmentsSequentially(
               absl::StrCat("Missing value for operand ", op->name(),
                            " while executing fragment ", frag.description));
         }
-        arg_ptrs.push_back(it->second.get());
+        TF_ASSIGN_OR_RETURN(
+            xla::PjRtBuffer * buf,
+            EnsureBufferOnDevice(it->second, target_device,
+                                 /*literal_fallback=*/nullptr));
+        arg_ptrs.push_back(buf);
       }
     }
 
     // 2) Execute the fragment
     TF_ASSIGN_OR_RETURN(
         std::vector<std::unique_ptr<xla::PjRtBuffer>> exec_outputs,
-        cf.exec->ExecuteSharded(arg_ptrs, device, exec_opts));
+        cf.exec->ExecuteSharded(arg_ptrs, target_device, exec_opts));
     if (exec_outputs.size() != 1) {
       return absl::InternalError(
           absl::StrCat("Expected a single output buffer from fragment ",
@@ -527,23 +673,90 @@ std::string MaterializeFeatureString(
   return token;
 }
 
-absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
-    const std::string& features, const xla::HloModule& module,
-    const xla::CompileOptions& compile_options,
-    const std::vector<PjRtBuffer*>& arg_ptrs, xla::PjRtDevice* device,
-    xla::PjRtCpuClient* cpu_client, const xla::Literal& ref_lit) {
-  auto aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
-      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"sapphirerapids",
-      /*features=*/features,
-      /*entry_point_name=*/"main.1",
-      /*relocation_model=*/
-      xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
+absl::StatusOr<BackendToken> ParseBackendToken(
+    const std::string& raw_token, bool enable_gpu_backend,
+    const llvm::StringMap<bool, llvm::MallocAllocator>& host_features) {
+  std::string cleaned = std::string(absl::StripAsciiWhitespace(raw_token));
+  std::string lowered = absl::AsciiStrToLower(cleaned);
+  auto payload_after_colon = [](const std::string& input) -> std::string {
+    auto pos = input.find(':');
+    if (pos == std::string::npos) {
+      return "";
+    }
+    return input.substr(pos + 1);
+  };
 
-  xla::XlaComputation computation(module.ToProto());
-  TF_ASSIGN_OR_RETURN(
-      std::unique_ptr<xla::PjRtLoadedExecutable> executable,
-      cpu_client->CompileAheadOfTimeAndLoad(computation, compile_options,
-                                            *aot_options));
+  auto is_prefix = [](absl::string_view lhs,
+                      absl::string_view rhs) -> bool {
+    return absl::StartsWith(lhs, rhs);
+  };
+
+  if (lowered == "gpu" || is_prefix(lowered, "gpu:")) {
+    if (!enable_gpu_backend) {
+      return absl::InvalidArgumentError(
+          "GPU backend requested but not enabled. Pass --enable_gpu "
+          "or set the enable flag when invoking the splitter.");
+    }
+    std::string spec = payload_after_colon(cleaned);
+    return BackendToken{BackendKind::kGpu, spec};
+  }
+
+  std::string cpu_payload = cleaned;
+  if (is_prefix(lowered, "cpu:")) {
+    cpu_payload = payload_after_colon(cleaned);
+  }
+  std::string features = MaterializeFeatureString(cpu_payload, host_features);
+  return BackendToken{BackendKind::kCpu, features};
+}
+
+absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
+    const BackendToken& backend, const xla::HloModule& module,
+    const xla::CompileOptions& compile_options,
+    absl::Span<const xla::Literal> input_literals,
+    xla::PjRtCpuClient* cpu_client, xla::PjRtClient* gpu_client,
+    const xla::Literal& ref_lit) {
+  std::unique_ptr<xla::PjRtLoadedExecutable> executable;
+  xla::PjRtDevice* device = nullptr;
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> arg_buffers;
+
+  if (backend.kind == BackendKind::kCpu) {
+    const std::string& features = backend.spec;
+    auto aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
+        /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"sapphirerapids",
+        /*features=*/features,
+        /*entry_point_name=*/"main.1",
+        /*relocation_model=*/
+        xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
+
+    xla::XlaComputation computation(module.ToProto());
+    TF_ASSIGN_OR_RETURN(
+        auto cpu_exec,
+        cpu_client->CompileAheadOfTimeAndLoad(computation, compile_options,
+                                              *aot_options));
+    executable = std::move(cpu_exec);
+    TF_ASSIGN_OR_RETURN(device, GetDefaultDevice(cpu_client, "CPU"));
+    TF_ASSIGN_OR_RETURN(arg_buffers,
+                        PrepareArgumentBuffers(input_literals, device));
+  } else {
+    if (gpu_client == nullptr) {
+      return absl::InvalidArgumentError(
+          "GPU backend requested but GPU client is unavailable");
+    }
+    xla::XlaComputation computation(module.ToProto());
+    TF_ASSIGN_OR_RETURN(auto gpu_exec,
+                        gpu_client->CompileAndLoad(computation,
+                                                    compile_options));
+    executable = std::move(gpu_exec);
+    TF_ASSIGN_OR_RETURN(device, GetDefaultDevice(gpu_client, "GPU"));
+    TF_ASSIGN_OR_RETURN(arg_buffers,
+                        PrepareArgumentBuffers(input_literals, device));
+  }
+
+  std::vector<xla::PjRtBuffer*> arg_ptrs;
+  arg_ptrs.reserve(arg_buffers.size());
+  for (auto& buffer : arg_buffers) {
+    arg_ptrs.push_back(buffer.get());
+  }
 
   ExecuteOptions execute_options;
   execute_options.execution_mode = ExecuteOptions::ExecutionMode::kSynchronous;
@@ -557,7 +770,7 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
   if (literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
     std::cout << "Full execution output does not match reference." << std::endl;
   }
-  std::cout << "Full execution (features=" << features
+  std::cout << "Full execution (target=" << backend.DebugString()
             << ") output matches reference." << std::endl;
 
   auto run_full_once = [&]() -> absl::Status {
@@ -569,21 +782,26 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
   };
 
   return BenchmarkExecution(
-      absl::StrCat("Full (features=", features, ")"), run_full_once);
+      absl::StrCat("Full (target=", backend.DebugString(), ")"),
+      run_full_once);
 }
 
 std::string DescribePolicy(const FeaturePolicy& policy) {
   if (policy.IsSingleBackend()) {
-    const std::string& token = policy.unique_tokens().front();
-    return token.empty() ? std::string("<default>") : token;
+    return policy.unique_tokens().front().DebugString();
   }
-  return absl::StrCat("cycle(",
-                      absl::StrJoin(policy.tokens(), "| "), ")");
+  std::vector<std::string> pieces;
+  pieces.reserve(policy.tokens().size());
+  for (const auto& token : policy.tokens()) {
+    pieces.push_back(token.DebugString());
+  }
+  return absl::StrCat("cycle(", absl::StrJoin(pieces, "| "), ")");
 }
 
 absl::Status RunAotCompilationExample(std::string hlo_file,
                                       std::string features_str,
-                                      std::string io_prefix) {
+                                      std::string io_prefix,
+                                      bool enable_gpu_backend) {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features =
       llvm::sys::getHostCPUFeatures();
@@ -604,9 +822,19 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
                           HloModuleConfig() /* unused */));
 
   xla::CpuClientOptions client_options;
-  TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> client,
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> cpu_client_holder,
                       xla::GetXlaPjrtCpuClient(client_options));
-  auto* cpu_client = tsl::down_cast<xla::PjRtCpuClient*>(client.get());
+  auto* cpu_client =
+      tsl::down_cast<xla::PjRtCpuClient*>(cpu_client_holder.get());
+
+  std::unique_ptr<xla::PjRtClient> gpu_client_holder;
+  xla::PjRtClient* gpu_client = nullptr;
+  if (enable_gpu_backend) {
+    xla::GpuClientOptions gpu_options;
+    TF_ASSIGN_OR_RETURN(gpu_client_holder,
+                        xla::GetXlaPjrtGpuClient(gpu_options));
+    gpu_client = gpu_client_holder.get();
+  }
 
   int num_params = module->entry_computation_layout().parameter_count();
   std::vector<xla::Literal> input_lits;
@@ -617,22 +845,9 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     input_lits.push_back(std::move(lit));
   }
 
-  std::vector<std::unique_ptr<PjRtBuffer>> args_buffers;
-  args_buffers.reserve(input_lits.size());
-  xla::PjRtDevice* device = client->devices().front();
-  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace * memory_space,
-                      device->default_memory_space());
-  for (const xla::Literal& arg_lit : input_lits) {
-    TF_ASSIGN_OR_RETURN(args_buffers.emplace_back(),
-                        client->BufferFromHostLiteral(arg_lit, memory_space));
-    TF_RETURN_IF_ERROR(args_buffers.back()->GetReadyFuture().Await());
-  }
-
-  std::vector<PjRtBuffer*> arg_ptrs;
-  arg_ptrs.reserve(args_buffers.size());
-  for (auto& buf : args_buffers) {
-    arg_ptrs.push_back(buf.get());
-  }
+  TF_ASSIGN_OR_RETURN(xla::PjRtDevice * cpu_device,
+                      GetDefaultDevice(cpu_client, "CPU"));
+  absl::Span<const xla::Literal> input_span = absl::MakeConstSpan(input_lits);
 
   std::string ref_path = absl::StrCat(io_prefix, "/output_0.ref.litpb");
   TF_ASSIGN_OR_RETURN(xla::Literal ref_lit,
@@ -666,29 +881,32 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
   };
 
   for (const auto& raw_tokens : feature_experiments) {
-    std::vector<std::string> materialized_tokens;
-    materialized_tokens.reserve(raw_tokens.size());
+    std::vector<BackendToken> backend_tokens;
+    backend_tokens.reserve(raw_tokens.size());
     for (const std::string& token : raw_tokens) {
-      materialized_tokens.push_back(
-          MaterializeFeatureString(token, host_machine_features));
+      TF_ASSIGN_OR_RETURN(BackendToken backend_token,
+                          ParseBackendToken(token, enable_gpu_backend,
+                                            host_machine_features));
+      backend_tokens.push_back(std::move(backend_token));
     }
-    FeaturePolicy policy(std::move(materialized_tokens));
+    FeaturePolicy policy(std::move(backend_tokens));
     std::cout << "=== Feature policy: " << DescribePolicy(policy) << " ==="
               << std::endl;
 
     absl::flat_hash_map<std::string, BenchmarkStats> full_stats_map;
-    for (const std::string& token : policy.unique_tokens()) {
+    for (const BackendToken& token : policy.unique_tokens()) {
       TF_ASSIGN_OR_RETURN(
           BenchmarkStats stats,
-          BenchmarkFullExecution(token, *module, compile_options, arg_ptrs,
-                                 device, cpu_client, ref_lit));
-      full_stats_map[token] = stats;
+          BenchmarkFullExecution(token, *module, compile_options, input_span,
+                                 cpu_client, gpu_client, ref_lit));
+      std::string key = token.DebugString();
+      full_stats_map[key] = stats;
       print_summary(
-          absl::StrCat("Full execution (features=", token, ")"), stats);
+          absl::StrCat("Full execution (target=", key, ")"), stats);
     }
     const BenchmarkStats* single_full_stats =
         policy.IsSingleBackend()
-            ? &full_stats_map[policy.unique_tokens().front()]
+            ? &full_stats_map[policy.unique_tokens().front().DebugString()]
             : nullptr;
 
     struct FragmentBenchmarkResult {
@@ -705,20 +923,24 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       }
       TF_ASSIGN_OR_RETURN(auto compiled_frags,
                           CompileFragments(fragments, "sapphirerapids",
-                                           policy, chunk_size, cpu_client));
+                                           policy, chunk_size, cpu_client,
+                                           gpu_client));
 
       std::shared_ptr<xla::Literal> fragmented_out;
+      TF_ASSIGN_OR_RETURN(auto verification_params,
+                          InitializeParameterStates(input_span, cpu_device));
       TF_RETURN_IF_ERROR(RunFragmentsSequentially(
-          *module, compiled_frags, args_buffers, client.get(),
-          &fragmented_out));
+          *module, compiled_frags, &verification_params, &fragmented_out));
       if (literal_comparison::Near(ref_lit, *fragmented_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
         std::cout << "Fragmented output does not match reference for chunk size "
                   << chunk_size << std::endl;
       }
 
       auto run_fragmented_once = [&]() -> absl::Status {
-        return RunFragmentsSequentially(*module, compiled_frags, args_buffers,
-                                        client.get(), /*literal_out=*/nullptr);
+        TF_ASSIGN_OR_RETURN(auto params,
+                            InitializeParameterStates(input_span, cpu_device));
+        return RunFragmentsSequentially(*module, compiled_frags, &params,
+                                        /*literal_out=*/nullptr);
       };
 
       TF_ASSIGN_OR_RETURN(
@@ -750,18 +972,44 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
 }
 
 int main(int argc, char** argv) {
-  if (argc != 4) {
-    std::cerr << "Usage: " << argv[0] << " <hlo_file> <cpu_features> <io_prefix>" << std::endl;
+  if (argc < 4 || argc > 5) {
+    std::cerr << "Usage: " << argv[0]
+              << " <hlo_file> <backend_policy> <io_prefix> [--enable_gpu|--disable_gpu]"
+              << std::endl;
     std::cerr << "  <hlo_file>: Path to the HLO text file." << std::endl;
-    std::cerr << "  <cpu_features>: Comma-separated CPU features to enable (or 'all' for all features)." << std::endl;
-    std::cerr << "  <io_prefix>: Prefix path for input/output literal files." << std::endl;
+    std::cerr << "  <backend_policy>: CPU feature experiments (e.g. 'all' or "
+                 "'cpu:all|gpu')."
+              << std::endl;
+    std::cerr << "  <io_prefix>: Prefix path for input/output literal files."
+              << std::endl;
+    std::cerr << "  Optional fourth arg toggles GPU splitting (default: off)."
+              << std::endl;
     return 1;
   }
   std::string hlo_file = argv[1];
   std::string features = argv[2];
   std::string io_prefix = argv[3];
+  bool enable_gpu_backend = false;
+  if (argc == 5) {
+    std::string flag = argv[4];
+    std::string lowered = absl::AsciiStrToLower(flag);
+    if (lowered == "--enable_gpu" || lowered == "enable_gpu" ||
+        lowered == "1" || lowered == "true") {
+      enable_gpu_backend = true;
+    } else if (lowered == "--disable_gpu" || lowered == "disable_gpu" ||
+               lowered == "0" || lowered == "false") {
+      enable_gpu_backend = false;
+    } else {
+      std::cerr << "Unrecognized GPU toggle '" << flag
+                << "'. Use --enable_gpu/--disable_gpu or true/false."
+                << std::endl;
+      return 1;
+    }
+  }
 
-  absl::Status status = RunAotCompilationExample(hlo_file, features, io_prefix);
+  absl::Status status =
+      RunAotCompilationExample(hlo_file, features, io_prefix,
+                               enable_gpu_backend);
   if (!status.ok()) {
     std::cerr << "Error: " << status.ToString() << std::endl;
     return 1;

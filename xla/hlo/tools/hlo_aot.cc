@@ -5,7 +5,6 @@
 #include "absl/strings/str_split.h"
 #include "llvm/Support/CodeGen.h"  // For Reloc
 #include "xla/hlo/parser/hlo_parser.h"
-#include "xla/service/compile_only_service.h"
 #include "xla/service/cpu/cpu_aot_compilation_result.h"
 #include "xla/service/compiler.h"
 #include "xla/stream_executor/platform_manager.h"  // Added for PlatformManager
