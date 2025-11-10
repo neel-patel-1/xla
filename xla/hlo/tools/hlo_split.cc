@@ -674,11 +674,16 @@ BenchmarkStats ComputeBenchmarkStats(const std::vector<double>& samples) {
 }
 
 absl::StatusOr<BenchmarkStats> BenchmarkExecution(
-    absl::string_view label,
-    const std::function<absl::Status()>& run_once) {
-  constexpr int kMaxRuns = 1000;
+    absl::string_view label, const std::function<absl::Status()>& run_once,
+    bool skip_first_sample = false) {
+  constexpr int kMaxRuns = 100;
   std::vector<double> samples;
   samples.reserve(kMaxRuns);
+
+  if (skip_first_sample) {
+    TF_RETURN_IF_ERROR(run_once());
+    std::cout << label << " warmup run (discarded)" << std::endl;
+  }
 
   for (int i = 0; i < kMaxRuns; ++i) {
     auto start = std::chrono::high_resolution_clock::now();
@@ -862,7 +867,8 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
 
   return BenchmarkExecution(
       absl::StrCat("Full (target=", backend.DebugString(), ")"),
-      run_full_once);
+      run_full_once,
+      /*skip_first_sample=*/backend.kind == BackendKind::kGpu);
 }
 
 std::string DescribePolicy(const FeaturePolicy& policy) {
@@ -1054,7 +1060,8 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
           BenchmarkExecution(
               absl::StrCat("Fragmented (policy=", DescribePolicy(policy),
                            ", chunk=", chunk_size, ")"),
-              run_fragmented_once));
+              run_fragmented_once,
+              /*skip_first_sample=*/has_gpu));
       fragment_results.push_back({chunk_size, stats});
     }
 
