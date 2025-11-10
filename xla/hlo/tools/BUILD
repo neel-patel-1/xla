@@ -6,6 +6,7 @@ load(
     "xla_cc_binary",
 )
 load("//xla/tsl:tsl.default.bzl", "filegroup")
+load("@local_config_cuda//cuda:build_defs.bzl", "if_cuda")
 
 package(
     # copybara:uncomment default_applicable_licenses = ["//tensorflow:license"],
@@ -210,7 +211,10 @@ cc_binary(
         "//xla/hlo/testlib:verified_hlo_module",
         "//xla/tests:test_utils",
         "//xla/tests:literal_test_util",
-    ],
+    ] + if_cuda([
+        "//xla/service:gpu_plugin",
+        "//xla/stream_executor:cuda_platform",
+    ]),
 )
 
 py_strict_library(
