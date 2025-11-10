@@ -203,6 +203,16 @@ absl::StatusOr<xla::PjRtDevice*> GetDefaultDevice(xla::PjRtClient* client,
   return devices.front();
 }
 
+bool ContainsGpuFragments(
+    const std::vector<CompiledFragment>& compiled_frags) {
+  for (const auto& cf : compiled_frags) {
+    if (cf.backend.kind == BackendKind::kGpu) {
+      return true;
+    }
+  }
+  return false;
+}
+
 absl::StatusOr<std::vector<ParameterState>> InitializeParameterStates(
     absl::Span<const xla::Literal> literals, xla::PjRtDevice* seed_device) {
   std::vector<ParameterState> states(literals.size());
@@ -224,6 +234,75 @@ PrepareArgumentBuffers(absl::Span<const xla::Literal> literals,
     buffers.push_back(std::move(buffer));
   }
   return buffers;
+}
+
+absl::Status RunFragmentsSequentiallyCpuOnly(
+    const xla::HloModule& original,
+    const std::vector<CompiledFragment>& compiled_frags,
+    absl::Span<xla::PjRtBuffer* const> entry_param_buffers,
+    std::shared_ptr<xla::Literal>* literal_out) {
+  xla::ExecuteOptions exec_opts;
+  exec_opts.execution_mode = xla::ExecuteOptions::ExecutionMode::kSynchronous;
+  absl::flat_hash_map<const xla::HloInstruction*,
+                      std::unique_ptr<xla::PjRtBuffer>>
+      value_map;
+  const xla::HloComputation* entry = original.entry_computation();
+
+  for (const auto& cf : compiled_frags) {
+    if (cf.backend.kind != BackendKind::kCpu) {
+      return absl::InvalidArgumentError(
+          "RunFragmentsSequentiallyCpuOnly received non-CPU fragment");
+    }
+    const InstructionFragment& frag = cf.frag;
+    std::vector<xla::PjRtBuffer*> arg_ptrs;
+    arg_ptrs.reserve(frag.external_operands.size());
+    for (const xla::HloInstruction* op : frag.external_operands) {
+      if (op->opcode() == xla::HloOpcode::kParameter) {
+        int param_idx = op->parameter_number();
+        if (param_idx < 0 ||
+            param_idx >= static_cast<int>(entry_param_buffers.size())) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Invalid parameter index ", param_idx));
+        }
+        arg_ptrs.push_back(entry_param_buffers[param_idx]);
+      } else {
+        auto it = value_map.find(op);
+        if (it == value_map.end()) {
+          return absl::InternalError(
+              absl::StrCat("Missing value for operand ", op->name(),
+                           " while executing fragment ", frag.description));
+        }
+        arg_ptrs.push_back(it->second.get());
+      }
+    }
+    TF_ASSIGN_OR_RETURN(
+        std::vector<std::unique_ptr<xla::PjRtBuffer>> exec_outputs,
+        cf.exec->ExecuteSharded(arg_ptrs, cf.device, exec_opts));
+    if (exec_outputs.size() != 1) {
+      return absl::InternalError(
+          absl::StrCat("Expected a single output buffer from fragment ",
+                       frag.description, ", got ", exec_outputs.size()));
+    }
+    TF_RETURN_IF_ERROR(exec_outputs[0]->GetReadyFuture().Await());
+    if (frag.produced_instructions.size() != 1) {
+      return absl::InternalError(
+          absl::StrCat("Fragment ", frag.description,
+                       " produced multiple values; chunking should prevent "
+                       "this."));
+    }
+    value_map[frag.produced_instructions.front()] =
+        std::move(exec_outputs[0]);
+  }
+
+  const xla::HloInstruction* root = entry->root_instruction();
+  auto it = value_map.find(root);
+  if (it == value_map.end()) {
+    return absl::InternalError("No value for ROOT instruction");
+  }
+  if (literal_out != nullptr) {
+    TF_ASSIGN_OR_RETURN(*literal_out, it->second->ToLiteralSync());
+  }
+  return absl::OkStatus();
 }
 
 absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
@@ -474,7 +553,7 @@ CompileFragments(const std::vector<InstructionFragment>& fragments,
   return compiled;
 }
 
-absl::Status RunFragmentsSequentially(
+absl::Status RunFragmentsSequentiallyMultiBackend(
     const xla::HloModule& original,
     const std::vector<CompiledFragment>& compiled_frags,
     std::vector<ParameterState>* entry_params,
@@ -849,6 +928,14 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
                       GetDefaultDevice(cpu_client, "CPU"));
   absl::Span<const xla::Literal> input_span = absl::MakeConstSpan(input_lits);
 
+  TF_ASSIGN_OR_RETURN(auto cpu_entry_buffer_storage,
+                      PrepareArgumentBuffers(input_span, cpu_device));
+  std::vector<xla::PjRtBuffer*> cpu_entry_ptrs;
+  cpu_entry_ptrs.reserve(cpu_entry_buffer_storage.size());
+  for (auto& buf : cpu_entry_buffer_storage) {
+    cpu_entry_ptrs.push_back(buf.get());
+  }
+
   std::string ref_path = absl::StrCat(io_prefix, "/output_0.ref.litpb");
   TF_ASSIGN_OR_RETURN(xla::Literal ref_lit,
                       LoadLiteralFromProtoFile(ref_path));
@@ -926,21 +1013,40 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
                                            policy, chunk_size, cpu_client,
                                            gpu_client));
 
+      bool has_gpu = ContainsGpuFragments(compiled_frags);
+
       std::shared_ptr<xla::Literal> fragmented_out;
-      TF_ASSIGN_OR_RETURN(auto verification_params,
-                          InitializeParameterStates(input_span, cpu_device));
-      TF_RETURN_IF_ERROR(RunFragmentsSequentially(
-          *module, compiled_frags, &verification_params, &fragmented_out));
+      if (!has_gpu) {
+        TF_RETURN_IF_ERROR(RunFragmentsSequentiallyCpuOnly(
+            *module, compiled_frags, absl::MakeSpan(cpu_entry_ptrs),
+            &fragmented_out));
+      } else {
+        TF_ASSIGN_OR_RETURN(auto verification_params,
+                            InitializeParameterStates(input_span, cpu_device));
+        TF_RETURN_IF_ERROR(RunFragmentsSequentiallyMultiBackend(
+            *module, compiled_frags, &verification_params, &fragmented_out));
+      }
       if (literal_comparison::Near(ref_lit, *fragmented_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
         std::cout << "Fragmented output does not match reference for chunk size "
                   << chunk_size << std::endl;
       }
 
-      auto run_fragmented_once = [&]() -> absl::Status {
+      std::vector<ParameterState> reusable_params;
+      if (has_gpu) {
         TF_ASSIGN_OR_RETURN(auto params,
                             InitializeParameterStates(input_span, cpu_device));
-        return RunFragmentsSequentially(*module, compiled_frags, &params,
-                                        /*literal_out=*/nullptr);
+        reusable_params = std::move(params);
+      }
+
+      auto run_fragmented_once = [&]() -> absl::Status {
+        if (!has_gpu) {
+          return RunFragmentsSequentiallyCpuOnly(
+              *module, compiled_frags, absl::MakeSpan(cpu_entry_ptrs),
+              /*literal_out=*/nullptr);
+        }
+        return RunFragmentsSequentiallyMultiBackend(
+            *module, compiled_frags, &reusable_params,
+            /*literal_out=*/nullptr);
       };
 
       TF_ASSIGN_OR_RETURN(
