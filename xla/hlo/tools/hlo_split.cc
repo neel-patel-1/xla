@@ -1036,6 +1036,9 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       if (literal_comparison::Near(ref_lit, *fragmented_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
         std::cout << "Fragmented output does not match reference for chunk size "
                   << chunk_size << std::endl;
+      } else {
+        std::cout << "Fragmented output matches reference for chunk size "
+                  << chunk_size << std::endl;
       }
 
       std::vector<ParameterState> reusable_params;
