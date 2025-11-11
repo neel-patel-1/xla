@@ -853,9 +853,10 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
                       result_buffers[0]->ToLiteralSync());
   if (literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
     std::cout << "Full execution output does not match reference." << std::endl;
+  } else {
+    std::cout << "Full execution (target=" << backend.DebugString()
+              << ") output matches reference." << std::endl;
   }
-  std::cout << "Full execution (target=" << backend.DebugString()
-            << ") output matches reference." << std::endl;
 
   auto run_full_once = [&]() -> absl::Status {
     TF_ASSIGN_OR_RETURN(
