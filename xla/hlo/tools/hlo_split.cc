@@ -55,6 +55,20 @@ using xla::HloModule;
 using xla::HloComputation;
 using xla::HloInstruction;
 
+void PrintLiteralForDebug(absl::string_view label, const xla::Literal& lit) {
+  std::cout << label << " (shape=" << xla::ShapeUtil::HumanString(lit.shape())
+            << ")" << std::endl;
+  std::cout << lit.ToStringWithoutShape() << std::endl;
+}
+
+void LogLiteralMismatch(absl::string_view context,
+                        const xla::Literal& reference,
+                        const xla::Literal& actual) {
+  std::cout << "=== " << context << " mismatch details ===" << std::endl;
+  PrintLiteralForDebug("Reference", reference);
+  PrintLiteralForDebug("Actual", actual);
+}
+
 struct InstructionFragment {
   std::unique_ptr<HloModule> module;
   std::vector<const xla::HloInstruction*> produced_instructions;
@@ -851,9 +865,15 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
   TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
   TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
                       result_buffers[0]->ToLiteralSync());
-  if (literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
+  auto compare_status =
+      literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5),
+                               std::nullopt, nullptr);
+  if (!compare_status.ok()) {
     std::cout << "Full execution (target=" << backend.DebugString()
               << ") output does NOT match reference!" << std::endl;
+    LogLiteralMismatch(
+        absl::StrCat("Full execution (target=", backend.DebugString(), ")"),
+        ref_lit, *full_out);
   } else {
     std::cout << "Full execution (target=" << backend.DebugString()
               << ") output matches reference." << std::endl;
@@ -1034,9 +1054,16 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
         TF_RETURN_IF_ERROR(RunFragmentsSequentiallyMultiBackend(
             *module, compiled_frags, &verification_params, &fragmented_out));
       }
-      if (literal_comparison::Near(ref_lit, *fragmented_out, ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr ) != absl::OkStatus()) {
+      auto frag_compare =
+          literal_comparison::Near(ref_lit, *fragmented_out,
+                                   ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr);
+      if (!frag_compare.ok()) {
         std::cout << "Fragmented output does not match reference for chunk size "
                   << chunk_size << std::endl;
+        LogLiteralMismatch(
+            absl::StrCat("Fragmented (chunk=", chunk_size, ", policy=",
+                         DescribePolicy(policy), ")"),
+            ref_lit, *fragmented_out);
       } else {
         std::cout << "Fragmented output matches reference for chunk size "
                   << chunk_size << std::endl;
