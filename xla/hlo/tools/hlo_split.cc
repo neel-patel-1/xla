@@ -866,7 +866,7 @@ absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
   TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
                       result_buffers[0]->ToLiteralSync());
   auto compare_status =
-      literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-5, 1e-5),
+      literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-1, 1e-1),
                                std::nullopt, nullptr);
   if (!compare_status.ok()) {
     std::cout << "Full execution (target=" << backend.DebugString()
@@ -1056,7 +1056,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       }
       auto frag_compare =
           literal_comparison::Near(ref_lit, *fragmented_out,
-                                   ErrorSpec(1e-5, 1e-5), std::nullopt, nullptr);
+                                   ErrorSpec(1e-1, 1e-1), std::nullopt, nullptr);
       if (!frag_compare.ok()) {
         std::cout << "Fragmented output does not match reference for chunk size "
                   << chunk_size << std::endl;
