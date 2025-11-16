@@ -112,8 +112,7 @@ bool operator==(const BackendToken& lhs, const BackendToken& rhs) {
   return lhs.kind == rhs.kind && lhs.spec == rhs.spec;
 }
 
-std::optional<BackendKind> ParseBackendAnnotation(
-    absl::string_view value) {
+std::optional<BackendKind> ParseBackendAnnotation(absl::string_view value) {
   std::string lowered = absl::AsciiStrToLower(value);
   if (absl::StartsWith(lowered, "gpu")) {
     return BackendKind::kGpu;
@@ -181,6 +180,21 @@ class FeaturePolicy {
   std::vector<BackendToken> unique_tokens_;
   bool require_annotations_ = false;
 };
+
+BackendToken ApplyBackendOverride(const BackendToken& policy_token,
+                                  const FeaturePolicy& policy,
+                                  std::optional<BackendKind> override_kind) {
+  if (!override_kind.has_value()) {
+    return policy_token;
+  }
+  if (*override_kind == BackendKind::kGpu) {
+    return BackendToken{BackendKind::kGpu, ""};
+  }
+  std::string features = policy_token.kind == BackendKind::kCpu
+                             ? policy_token.spec
+                             : policy.DefaultCpuFeatures();
+  return BackendToken{BackendKind::kCpu, features};
+}
 
 struct ParameterState {
   const xla::Literal* literal = nullptr;
