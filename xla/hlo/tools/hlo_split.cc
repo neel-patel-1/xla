@@ -107,6 +107,18 @@ bool operator==(const BackendToken& lhs, const BackendToken& rhs) {
   return lhs.kind == rhs.kind && lhs.spec == rhs.spec;
 }
 
+std::optional<BackendKind> ParseBackendAnnotation(
+    absl::string_view value) {
+  std::string lowered = absl::AsciiStrToLower(value);
+  if (absl::StartsWith(lowered, "gpu")) {
+    return BackendKind::kGpu;
+  }
+  if (absl::StartsWith(lowered, "cpu")) {
+    return BackendKind::kCpu;
+  }
+  return std::nullopt;
+}
+
 // Small holder tying a fragment to its compiled executable.
 struct CompiledFragment {
   InstructionFragment frag;
