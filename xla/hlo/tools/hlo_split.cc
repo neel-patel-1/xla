@@ -69,6 +69,8 @@ void LogLiteralMismatch(absl::string_view context,
   PrintLiteralForDebug("Actual", actual);
 }
 
+enum class BackendKind { kCpu, kGpu };
+
 constexpr absl::string_view kBackendAttrKey = "backend";
 
 struct InstructionFragment {
@@ -84,8 +86,6 @@ struct InstructionFragment {
   InstructionFragment(InstructionFragment&&) = default;
   InstructionFragment& operator=(InstructionFragment&&) = default;
 };
-
-enum class BackendKind { kCpu, kGpu };
 
 struct BackendToken {
   BackendKind kind = BackendKind::kCpu;
