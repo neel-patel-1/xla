@@ -78,6 +78,11 @@ struct InstructionFragment {
   std::string description;
   int chunk_index = -1;
   std::optional<BackendKind> backend_override;
+  InstructionFragment() = default;
+  InstructionFragment(const InstructionFragment&) = delete;
+  InstructionFragment& operator=(const InstructionFragment&) = delete;
+  InstructionFragment(InstructionFragment&&) = default;
+  InstructionFragment& operator=(InstructionFragment&&) = default;
 };
 
 enum class BackendKind { kCpu, kGpu };
@@ -182,7 +187,7 @@ struct ParameterState {
   std::unique_ptr<xla::PjRtBuffer> buffer;
 };
 
-absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> UploadLiteralToDevice(
+tsl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> UploadLiteralToDevice(
     const xla::Literal& literal, xla::PjRtDevice* device) {
   if (device == nullptr) {
     return absl::InvalidArgumentError("Target device is null");
@@ -196,7 +201,7 @@ absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> UploadLiteralToDevice(
   return buffer;
 }
 
-absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CopyBufferBetweenClients(
+tsl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CopyBufferBetweenClients(
     xla::PjRtBuffer* source, xla::PjRtDevice* target_device) {
   if (source == nullptr) {
     return absl::InvalidArgumentError("Source buffer is null");
@@ -206,7 +211,7 @@ absl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> CopyBufferBetweenClients(
   return UploadLiteralToDevice(*literal, target_device);
 }
 
-absl::StatusOr<xla::PjRtBuffer*> EnsureBufferOnDevice(
+tsl::StatusOr<xla::PjRtBuffer*> EnsureBufferOnDevice(
     std::unique_ptr<xla::PjRtBuffer>& buffer, xla::PjRtDevice* target_device,
     const xla::Literal* literal_fallback) {
   if (target_device == nullptr) {
@@ -230,7 +235,7 @@ absl::StatusOr<xla::PjRtBuffer*> EnsureBufferOnDevice(
       "No literal fallback or buffer available for transfer");
 }
 
-absl::StatusOr<xla::PjRtDevice*> GetDefaultDevice(xla::PjRtClient* client,
+tsl::StatusOr<xla::PjRtDevice*> GetDefaultDevice(xla::PjRtClient* client,
                                                   absl::string_view label) {
   if (client == nullptr) {
     return absl::InvalidArgumentError(
@@ -254,7 +259,7 @@ bool ContainsGpuFragments(
   return false;
 }
 
-absl::StatusOr<std::vector<ParameterState>> InitializeParameterStates(
+tsl::StatusOr<std::vector<ParameterState>> InitializeParameterStates(
     absl::Span<const xla::Literal> literals, xla::PjRtDevice* seed_device) {
   std::vector<ParameterState> states(literals.size());
   for (int i = 0; i < literals.size(); ++i) {
@@ -265,7 +270,7 @@ absl::StatusOr<std::vector<ParameterState>> InitializeParameterStates(
   return states;
 }
 
-absl::StatusOr<std::vector<std::unique_ptr<xla::PjRtBuffer>>>
+tsl::StatusOr<std::vector<std::unique_ptr<xla::PjRtBuffer>>>
 PrepareArgumentBuffers(absl::Span<const xla::Literal> literals,
                        xla::PjRtDevice* device) {
   std::vector<std::unique_ptr<xla::PjRtBuffer>> buffers;
@@ -346,7 +351,7 @@ absl::Status RunFragmentsSequentiallyCpuOnly(
   return absl::OkStatus();
 }
 
-absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
+tsl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   std::string data;
   {
     std::unique_ptr<tsl::RandomAccessFile> file;
@@ -367,10 +372,11 @@ absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   return lit;
 }
 
-absl::StatusOr<InstructionFragment> BuildFragmentFromChunk(
+absl::Status BuildFragmentFromChunk(
     const xla::HloModule& module,
     absl::Span<xla::HloInstruction* const> chunk_instructions,
-    int chunk_index, bool require_backend_annotations) {
+    int chunk_index, bool require_backend_annotations,
+    InstructionFragment* out) {
   if (chunk_instructions.empty()) {
     return absl::InternalError("Cannot build fragment from empty chunk");
   }
@@ -495,18 +501,17 @@ absl::StatusOr<InstructionFragment> BuildFragmentFromChunk(
   frag->mutable_config().SetDefaultComputationLayout(
       comp->ComputeProgramShape());
 
-  InstructionFragment info;
-  info.module = std::move(frag);
-  info.produced_instructions = std::move(produced_instructions);
-  info.external_operands = std::move(external_operands);
-  info.description =
+  out->module = std::move(frag);
+  out->produced_instructions = std::move(produced_instructions);
+  out->external_operands = std::move(external_operands);
+  out->description =
       absl::StrCat("chunk#", chunk_index, "_size=", chunk_instructions.size());
-  info.chunk_index = chunk_index;
-  info.backend_override = forced_backend;
-  return info;
+  out->chunk_index = chunk_index;
+  out->backend_override = forced_backend;
+  return absl::OkStatus();
 }
 
-absl::StatusOr<std::vector<InstructionFragment>>
+tsl::StatusOr<std::vector<InstructionFragment>>
 SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
                          bool require_backend_annotations) {
   const xla::HloComputation* entry = module.entry_computation();
@@ -528,17 +533,19 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
   std::vector<InstructionFragment> fragments;
   fragments.reserve((worklist.size() + chunk_size - 1) / chunk_size);
   int chunk_index = 0;
+  InstructionFragment fragment_buffer;
   for (int i = 0; i < worklist.size();) {
     int end = std::min<int>(i + chunk_size, worklist.size());
     std::optional<InstructionFragment> selected_fragment;
     while (end > i) {
       absl::Span<xla::HloInstruction* const> attempt(worklist.data() + i,
                                                      end - i);
-      TF_ASSIGN_OR_RETURN(auto fragment,
-                          BuildFragmentFromChunk(module, attempt, chunk_index,
-                                                 require_backend_annotations));
-      if (fragment.produced_instructions.size() == 1) {
-        selected_fragment = std::move(fragment);
+      fragment_buffer = InstructionFragment();
+      TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
+          module, attempt, chunk_index, require_backend_annotations,
+          &fragment_buffer));
+      if (fragment_buffer.produced_instructions.size() == 1) {
+        selected_fragment = std::move(fragment_buffer);
         break;
       }
       --end;
@@ -557,7 +564,7 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
 // Compile each fragment with maybe different feature sets.
 // For simplicity, this uses the same features for all; you can vary it
 // by index or opcode.
-absl::StatusOr<std::vector<CompiledFragment>>
+tsl::StatusOr<std::vector<CompiledFragment>>
 CompileFragments(const std::vector<InstructionFragment>& fragments,
                  const std::string& cpu_name,
                  const FeaturePolicy& feature_policy,
@@ -756,7 +763,7 @@ BenchmarkStats ComputeBenchmarkStats(const std::vector<double>& samples) {
   return stats;
 }
 
-absl::StatusOr<BenchmarkStats> BenchmarkExecution(
+tsl::StatusOr<BenchmarkStats> BenchmarkExecution(
     absl::string_view label, const std::function<absl::Status()>& run_once,
     bool skip_first_sample = false) {
   constexpr int kMaxRuns = 100;
@@ -840,7 +847,7 @@ std::string MaterializeFeatureString(
   return token;
 }
 
-absl::StatusOr<BackendToken> ParseBackendToken(
+tsl::StatusOr<BackendToken> ParseBackendToken(
     const std::string& raw_token, bool enable_gpu_backend,
     const llvm::StringMap<bool, llvm::MallocAllocator>& host_features) {
   std::string cleaned = std::string(absl::StripAsciiWhitespace(raw_token));
@@ -876,7 +883,7 @@ absl::StatusOr<BackendToken> ParseBackendToken(
   return BackendToken{BackendKind::kCpu, features};
 }
 
-absl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
+tsl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
     const BackendToken& backend, const xla::HloModule& module,
     const xla::CompileOptions& compile_options,
     absl::Span<const xla::Literal> input_literals,
