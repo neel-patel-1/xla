@@ -69,12 +69,15 @@ void LogLiteralMismatch(absl::string_view context,
   PrintLiteralForDebug("Actual", actual);
 }
 
+constexpr absl::string_view kBackendAttrKey = "backend";
+
 struct InstructionFragment {
   std::unique_ptr<HloModule> module;
   std::vector<const xla::HloInstruction*> produced_instructions;
   std::vector<const xla::HloInstruction*> external_operands;
   std::string description;
   int chunk_index = -1;
+  std::optional<BackendKind> backend_override;
 };
 
 enum class BackendKind { kCpu, kGpu };
@@ -117,8 +120,10 @@ struct CompiledFragment {
 
 class FeaturePolicy {
  public:
-  explicit FeaturePolicy(std::vector<BackendToken> tokens)
-      : tokens_(std::move(tokens)) {
+  FeaturePolicy(std::vector<BackendToken> tokens,
+                bool require_annotations = false)
+      : tokens_(std::move(tokens)),
+        require_annotations_(require_annotations) {
     if (tokens_.empty()) {
       tokens_.push_back(BackendToken{BackendKind::kCpu, ""});
     }
@@ -144,10 +149,20 @@ class FeaturePolicy {
     return unique_tokens_;
   }
   bool IsSingleBackend() const { return unique_tokens_.size() == 1; }
+  bool require_annotations() const { return require_annotations_; }
+  std::string DefaultCpuFeatures() const {
+    for (const auto& token : tokens_) {
+      if (token.kind == BackendKind::kCpu) {
+        return token.spec;
+      }
+    }
+    return "";
+  }
 
  private:
   std::vector<BackendToken> tokens_;
   std::vector<BackendToken> unique_tokens_;
+  bool require_annotations_ = false;
 };
 
 struct ParameterState {
@@ -343,7 +358,7 @@ absl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
 absl::StatusOr<InstructionFragment> BuildFragmentFromChunk(
     const xla::HloModule& module,
     absl::Span<xla::HloInstruction* const> chunk_instructions,
-    int chunk_index) {
+    int chunk_index, bool require_backend_annotations) {
   if (chunk_instructions.empty()) {
     return absl::InternalError("Cannot build fragment from empty chunk");
   }
@@ -364,8 +379,38 @@ absl::StatusOr<InstructionFragment> BuildFragmentFromChunk(
   std::vector<const xla::HloInstruction*> external_operands;
   external_operands.reserve(chunk_instructions.size());
   int param_index = 0;
+  std::optional<BackendKind> forced_backend;
+  const std::string backend_attr_key(kBackendAttrKey);
 
   for (xla::HloInstruction* instr : chunk_instructions) {
+    const auto& attr_map = instr->frontend_attributes().map();
+    auto attr_it = attr_map.find(backend_attr_key);
+    if (attr_it != attr_map.end()) {
+      std::optional<BackendKind> parsed =
+          ParseBackendAnnotation(attr_it->second);
+      if (!parsed.has_value()) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Instruction ", instr->name(),
+                         " has invalid backend attribute value '",
+                         attr_it->second, "'"));
+      }
+      if (forced_backend.has_value() && forced_backend != parsed) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Conflicting backend annotations within fragment at "
+                         "chunk ",
+                         chunk_index, ". Instruction ", instr->name(),
+                         " requests ", attr_it->second,
+                         " but previous instruction requested ",
+                         forced_backend.value() == BackendKind::kGpu ? "gpu"
+                                                                     : "cpu"));
+      }
+      forced_backend = parsed;
+    } else if (require_backend_annotations) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Instruction ", instr->name(),
+                       " is missing required backend annotation."));
+    }
+
     std::vector<xla::HloInstruction*> new_operands;
     new_operands.reserve(instr->operand_count());
     for (xla::HloInstruction* operand : instr->operands()) {
@@ -445,11 +490,13 @@ absl::StatusOr<InstructionFragment> BuildFragmentFromChunk(
   info.description =
       absl::StrCat("chunk#", chunk_index, "_size=", chunk_instructions.size());
   info.chunk_index = chunk_index;
+  info.backend_override = forced_backend;
   return info;
 }
 
 absl::StatusOr<std::vector<InstructionFragment>>
-SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size) {
+SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
+                         bool require_backend_annotations) {
   const xla::HloComputation* entry = module.entry_computation();
   std::vector<xla::HloInstruction*> order = entry->MakeInstructionPostOrder();
   std::vector<xla::HloInstruction*> worklist;
@@ -476,7 +523,8 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size) {
       absl::Span<xla::HloInstruction* const> attempt(worklist.data() + i,
                                                      end - i);
       TF_ASSIGN_OR_RETURN(auto fragment,
-                          BuildFragmentFromChunk(module, attempt, chunk_index));
+                          BuildFragmentFromChunk(module, attempt, chunk_index,
+                                                 require_backend_annotations));
       if (fragment.produced_instructions.size() == 1) {
         selected_fragment = std::move(fragment);
         break;
@@ -510,8 +558,17 @@ CompileFragments(const std::vector<InstructionFragment>& fragments,
   compiled.reserve(fragments.size());
 
   for (const auto& frag : fragments) {
-    const BackendToken& backend =
+    if (feature_policy.require_annotations() &&
+        !frag.backend_override.has_value()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Fragment ", frag.description,
+                       " is missing backend annotation while backend_attribute "
+                       "policy is active."));
+    }
+    BackendToken backend =
         feature_policy.SelectForChunk(frag.chunk_index);
+    backend =
+        ApplyBackendOverride(backend, feature_policy, frag.backend_override);
     xla::XlaComputation computation(frag.module->ToProto());
     std::unique_ptr<xla::PjRtLoadedExecutable> exec;
     xla::PjRtDevice* device = nullptr;
@@ -998,13 +1055,21 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
   for (const auto& raw_tokens : feature_experiments) {
     std::vector<BackendToken> backend_tokens;
     backend_tokens.reserve(raw_tokens.size());
+    bool require_annotations = false;
     for (const std::string& token : raw_tokens) {
+      if (absl::EqualsIgnoreCase(token, "backend_attribute")) {
+        require_annotations = true;
+        continue;
+      }
       TF_ASSIGN_OR_RETURN(BackendToken backend_token,
                           ParseBackendToken(token, enable_gpu_backend,
                                             host_machine_features));
       backend_tokens.push_back(std::move(backend_token));
     }
-    FeaturePolicy policy(std::move(backend_tokens));
+    if (backend_tokens.empty()) {
+      backend_tokens.push_back(BackendToken{BackendKind::kCpu, ""});
+    }
+    FeaturePolicy policy(std::move(backend_tokens), require_annotations);
     std::cout << "=== Feature policy: " << DescribePolicy(policy) << " ==="
               << std::endl;
 
@@ -1032,7 +1097,8 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
 
     for (int chunk_size : chunk_sizes) {
       TF_ASSIGN_OR_RETURN(auto fragments,
-                          SplitModuleWithChunkSize(*module, chunk_size));
+                          SplitModuleWithChunkSize(*module, chunk_size,
+                                                   policy.require_annotations()));
       if (fragments.empty()) {
         continue;
       }
