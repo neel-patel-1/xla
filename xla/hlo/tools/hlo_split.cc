@@ -123,6 +123,24 @@ std::optional<BackendKind> ParseBackendAnnotation(absl::string_view value) {
   return std::nullopt;
 }
 
+tsl::StatusOr<std::optional<BackendKind>> ExtractBackendAnnotation(
+    const xla::HloInstruction& instr) {
+  const auto& attr_map = instr.frontend_attributes().map();
+  auto attr_it = attr_map.find(std::string(kBackendAttrKey));
+  if (attr_it == attr_map.end()) {
+    return std::optional<BackendKind>();
+  }
+  std::optional<BackendKind> parsed =
+      ParseBackendAnnotation(attr_it->second);
+  if (!parsed.has_value()) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Instruction ", instr.name(),
+                     " has invalid backend attribute value '",
+                     attr_it->second, "'"));
+  }
+  return parsed;
+}
+
 // Small holder tying a fragment to its compiled executable.
 struct CompiledFragment {
   InstructionFragment frag;
@@ -415,28 +433,22 @@ absl::Status BuildFragmentFromChunk(
   const std::string backend_attr_key(kBackendAttrKey);
 
   for (xla::HloInstruction* instr : chunk_instructions) {
-    const auto& attr_map = instr->frontend_attributes().map();
-    auto attr_it = attr_map.find(backend_attr_key);
-    if (attr_it != attr_map.end()) {
-      std::optional<BackendKind> parsed =
-          ParseBackendAnnotation(attr_it->second);
-      if (!parsed.has_value()) {
-        return absl::InvalidArgumentError(
-            absl::StrCat("Instruction ", instr->name(),
-                         " has invalid backend attribute value '",
-                         attr_it->second, "'"));
-      }
-      if (forced_backend.has_value() && forced_backend != parsed) {
+    TF_ASSIGN_OR_RETURN(std::optional<BackendKind> backend_annotation,
+                        ExtractBackendAnnotation(*instr));
+    if (backend_annotation.has_value()) {
+      if (forced_backend.has_value() && forced_backend != backend_annotation) {
         return absl::InvalidArgumentError(
             absl::StrCat("Conflicting backend annotations within fragment at "
                          "chunk ",
                          chunk_index, ". Instruction ", instr->name(),
-                         " requests ", attr_it->second,
+                         " requests ", instr->frontend_attributes()
+                                             .map()
+                                             .at(backend_attr_key),
                          " but previous instruction requested ",
                          forced_backend.value() == BackendKind::kGpu ? "gpu"
                                                                      : "cpu"));
       }
-      forced_backend = parsed;
+      forced_backend = backend_annotation;
     } else if (require_backend_annotations) {
       return absl::InvalidArgumentError(
           absl::StrCat("Instruction ", instr->name(),
@@ -572,6 +584,70 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
     i = end;
     ++chunk_index;
   }
+  return fragments;
+}
+
+tsl::StatusOr<std::vector<InstructionFragment>>
+SplitModuleByBackendAnnotations(const xla::HloModule& module,
+                                bool require_backend_annotations) {
+  const xla::HloComputation* entry = module.entry_computation();
+  std::vector<xla::HloInstruction*> order = entry->MakeInstructionPostOrder();
+  std::vector<xla::HloInstruction*> worklist;
+  worklist.reserve(order.size());
+  for (xla::HloInstruction* instr : order) {
+    if (instr->opcode() == xla::HloOpcode::kParameter) {
+      continue;
+    }
+    worklist.push_back(instr);
+  }
+  if (worklist.empty()) {
+    return std::vector<InstructionFragment>();
+  }
+
+  std::vector<InstructionFragment> fragments;
+  fragments.reserve(worklist.size());
+  std::vector<xla::HloInstruction*> current_chunk;
+  current_chunk.reserve(worklist.size());
+  std::optional<BackendKind> current_backend;
+  int chunk_index = 0;
+
+  for (xla::HloInstruction* instr : worklist) {
+    TF_ASSIGN_OR_RETURN(std::optional<BackendKind> backend_annotation,
+                        ExtractBackendAnnotation(*instr));
+    if (require_backend_annotations && !backend_annotation.has_value()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Instruction ", instr->name(),
+                       " is missing backend annotation while "
+                       "backend_attribute policy is active."));
+    }
+
+    if (current_chunk.empty()) {
+      current_backend = backend_annotation;
+      current_chunk.push_back(instr);
+      continue;
+    }
+
+    if (backend_annotation != current_backend) {
+      InstructionFragment fragment_buffer;
+      TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
+          module, absl::MakeSpan(current_chunk), chunk_index,
+          require_backend_annotations, &fragment_buffer));
+      fragments.push_back(std::move(fragment_buffer));
+      ++chunk_index;
+      current_chunk.clear();
+      current_backend = backend_annotation;
+    }
+    current_chunk.push_back(instr);
+  }
+
+  if (!current_chunk.empty()) {
+    InstructionFragment fragment_buffer;
+    TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
+        module, absl::MakeSpan(current_chunk), chunk_index,
+        require_backend_annotations, &fragment_buffer));
+    fragments.push_back(std::move(fragment_buffer));
+  }
+
   return fragments;
 }
 
@@ -1125,10 +1201,87 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
             : nullptr;
 
     struct FragmentBenchmarkResult {
-      int chunk_size;
+      std::string label;
       BenchmarkStats stats;
+      std::optional<int> chunk_size;
     };
     std::vector<FragmentBenchmarkResult> fragment_results;
+
+    if (policy.require_annotations()) {
+      TF_ASSIGN_OR_RETURN(auto annotation_fragments,
+                          SplitModuleByBackendAnnotations(
+                              *module, policy.require_annotations()));
+      if (annotation_fragments.empty()) {
+        continue;
+      }
+      TF_ASSIGN_OR_RETURN(auto compiled_frags,
+                          CompileFragments(annotation_fragments,
+                                           "sapphirerapids", policy,
+                                           /*chunk_size=*/-1, cpu_client,
+                                           gpu_client));
+
+      bool has_gpu = ContainsGpuFragments(compiled_frags);
+
+      std::shared_ptr<xla::Literal> fragmented_out;
+      if (!has_gpu) {
+        TF_RETURN_IF_ERROR(RunFragmentsSequentiallyCpuOnly(
+            *module, compiled_frags, absl::MakeSpan(cpu_entry_ptrs),
+            &fragmented_out));
+      } else {
+        TF_ASSIGN_OR_RETURN(auto verification_params,
+                            InitializeParameterStates(input_span, cpu_device));
+        TF_RETURN_IF_ERROR(RunFragmentsSequentiallyMultiBackend(
+            *module, compiled_frags, &verification_params, &fragmented_out));
+      }
+      auto frag_compare =
+          literal_comparison::Near(ref_lit, *fragmented_out,
+                                   ErrorSpec(1e-1, 1e-1), std::nullopt, nullptr);
+      if (!frag_compare.ok()) {
+        std::cout
+            << "Fragmented output does not match reference for contiguous "
+               "backend fragments"
+            << std::endl;
+        LogLiteralMismatch(
+            absl::StrCat("Fragmented (policy=", DescribePolicy(policy),
+                         ", backend_attribute_contiguous)"),
+            ref_lit, *fragmented_out);
+      } else {
+        std::cout << "Fragmented output matches reference for contiguous "
+                  << "backend fragments" << std::endl;
+      }
+
+      std::vector<ParameterState> reusable_params;
+      if (has_gpu) {
+        TF_ASSIGN_OR_RETURN(auto params,
+                            InitializeParameterStates(input_span, cpu_device));
+        reusable_params = std::move(params);
+      }
+
+      auto run_fragmented_once = [&]() -> absl::Status {
+        if (!has_gpu) {
+          return RunFragmentsSequentiallyCpuOnly(
+              *module, compiled_frags, absl::MakeSpan(cpu_entry_ptrs),
+              /*literal_out=*/nullptr);
+        }
+        return RunFragmentsSequentiallyMultiBackend(
+            *module, compiled_frags, &reusable_params,
+            /*literal_out=*/nullptr);
+      };
+
+      TF_ASSIGN_OR_RETURN(
+          BenchmarkStats stats,
+          BenchmarkExecution(
+              absl::StrCat("Fragmented (policy=", DescribePolicy(policy),
+                           ", chunk=backend_attribute_contiguous)"),
+              run_fragmented_once,
+              /*skip_first_sample=*/has_gpu));
+      fragment_results.push_back(
+          {"backend_attribute_contiguous", stats, std::nullopt});
+      const auto& frag_result = fragment_results.back();
+      print_summary(absl::StrCat("Fragmented ", frag_result.label),
+                    frag_result.stats);
+      continue;
+    }
 
     for (int chunk_size : chunk_sizes) {
       TF_ASSIGN_OR_RETURN(auto fragments,
@@ -1195,20 +1348,23 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
                            ", chunk=", chunk_size, ")"),
               run_fragmented_once,
               /*skip_first_sample=*/has_gpu));
-      fragment_results.push_back({chunk_size, stats});
+      fragment_results.push_back(
+          {absl::StrCat("chunk=", chunk_size), stats, chunk_size});
     }
 
     for (const auto& frag_result : fragment_results) {
-      print_summary(absl::StrCat("Fragmented chunk=", frag_result.chunk_size),
+      print_summary(absl::StrCat("Fragmented ", frag_result.label),
                     frag_result.stats);
-      if (single_full_stats && frag_result.stats.mean_ms > 0.0) {
+      if (frag_result.chunk_size.has_value() && single_full_stats &&
+          frag_result.stats.mean_ms > 0.0) {
         std::cout << "  full/fragment mean ratio (chunk "
-                  << frag_result.chunk_size << "): "
+                  << *frag_result.chunk_size << "): "
                   << single_full_stats->mean_ms / frag_result.stats.mean_ms
                   << "x" << std::endl;
-      } else if (!policy.IsSingleBackend()) {
+      } else if (!policy.IsSingleBackend() &&
+                 frag_result.chunk_size.has_value()) {
         std::cout << "  full/fragment mean ratio (chunk "
-                  << frag_result.chunk_size
+                  << *frag_result.chunk_size
                   << "): N/A (multi-backend policy)" << std::endl;
       }
     }
