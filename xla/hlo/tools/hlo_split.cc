@@ -1211,20 +1211,28 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
               << std::endl;
 
     absl::flat_hash_map<std::string, BenchmarkStats> full_stats_map;
-    for (const BackendToken& token : policy.unique_tokens()) {
-      TF_ASSIGN_OR_RETURN(
-          BenchmarkStats stats,
-          BenchmarkFullExecution(token, *module, compile_options, input_span,
-                                 cpu_client, gpu_client, ref_lit));
-      std::string key = token.DebugString();
-      full_stats_map[key] = stats;
-      print_summary(
-          absl::StrCat("Full execution (target=", key, ")"), stats);
+    const BenchmarkStats* single_full_stats = nullptr;
+    if (!policy.require_annotations()) {
+      for (const BackendToken& token : policy.unique_tokens()) {
+        TF_ASSIGN_OR_RETURN(
+            BenchmarkStats stats,
+            BenchmarkFullExecution(token, *module, compile_options, input_span,
+                                   cpu_client, gpu_client, ref_lit));
+        std::string key = token.DebugString();
+        full_stats_map[key] = stats;
+        print_summary(
+            absl::StrCat("Full execution (target=", key, ")"), stats);
+      }
+      single_full_stats = policy.IsSingleBackend()
+                              ? &full_stats_map[policy.unique_tokens()
+                                                    .front()
+                                                    .DebugString()]
+                              : nullptr;
+    } else {
+      std::cout << "Skipping full single-backend benchmark since "
+                   "backend_attribute policy is active."
+                << std::endl;
     }
-    const BenchmarkStats* single_full_stats =
-        policy.IsSingleBackend()
-            ? &full_stats_map[policy.unique_tokens().front().DebugString()]
-            : nullptr;
 
     struct FragmentBenchmarkResult {
       std::string label;
