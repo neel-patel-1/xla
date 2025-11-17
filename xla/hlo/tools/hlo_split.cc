@@ -1092,6 +1092,8 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     for (const std::string& token : raw_tokens) {
       if (absl::EqualsIgnoreCase(token, "backend_attribute")) {
         require_annotations = true;
+        std::cout << "=== Enabling backend attribute requirement ==="
+                  << std::endl;
         continue;
       }
       TF_ASSIGN_OR_RETURN(BackendToken backend_token,
