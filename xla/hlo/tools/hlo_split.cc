@@ -414,8 +414,8 @@ tsl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
 
 absl::Status BuildFragmentFromChunk(
     const xla::HloModule& module,
-    absl::Span<xla::HloInstruction* const> chunk_instructions,
-    int chunk_index, bool require_backend_annotations,
+    absl::Span<xla::HloInstruction* const> chunk_instructions, int chunk_index,
+    bool require_backend_annotations, bool ignore_backend_annotations,
     InstructionFragment* out) {
   if (chunk_instructions.empty()) {
     return absl::InternalError("Cannot build fragment from empty chunk");
@@ -441,26 +441,30 @@ absl::Status BuildFragmentFromChunk(
   const std::string backend_attr_key(kBackendAttrKey);
 
   for (xla::HloInstruction* instr : chunk_instructions) {
-    TF_ASSIGN_OR_RETURN(std::optional<BackendKind> backend_annotation,
-                        ExtractBackendAnnotation(*instr));
-    if (backend_annotation.has_value()) {
-      if (forced_backend.has_value() && forced_backend != backend_annotation) {
+    std::optional<BackendKind> backend_annotation;
+    if (!ignore_backend_annotations) {
+      TF_ASSIGN_OR_RETURN(backend_annotation,
+                          ExtractBackendAnnotation(*instr));
+      if (backend_annotation.has_value()) {
+        if (forced_backend.has_value() &&
+            forced_backend != backend_annotation) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("Conflicting backend annotations within fragment at "
+                           "chunk ",
+                           chunk_index, ". Instruction ", instr->name(),
+                           " requests ", instr->frontend_attributes()
+                                           .map()
+                                           .at(backend_attr_key),
+                           " but previous instruction requested ",
+                           forced_backend.value() == BackendKind::kGpu ? "gpu"
+                                                                       : "cpu"));
+        }
+        forced_backend = backend_annotation;
+      } else if (require_backend_annotations) {
         return absl::InvalidArgumentError(
-            absl::StrCat("Conflicting backend annotations within fragment at "
-                         "chunk ",
-                         chunk_index, ". Instruction ", instr->name(),
-                         " requests ", instr->frontend_attributes()
-                                             .map()
-                                             .at(backend_attr_key),
-                         " but previous instruction requested ",
-                         forced_backend.value() == BackendKind::kGpu ? "gpu"
-                                                                     : "cpu"));
+            absl::StrCat("Instruction ", instr->name(),
+                         " is missing required backend annotation."));
       }
-      forced_backend = backend_annotation;
-    } else if (require_backend_annotations) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Instruction ", instr->name(),
-                       " is missing required backend annotation."));
     }
 
     std::vector<xla::HloInstruction*> new_operands;
@@ -545,9 +549,9 @@ absl::Status BuildFragmentFromChunk(
   return absl::OkStatus();
 }
 
-tsl::StatusOr<std::vector<InstructionFragment>>
-SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
-                         bool require_backend_annotations) {
+tsl::StatusOr<std::vector<InstructionFragment>> SplitModuleWithChunkSize(
+    const xla::HloModule& module, int chunk_size,
+    bool require_backend_annotations, bool ignore_backend_annotations) {
   const xla::HloComputation* entry = module.entry_computation();
   std::vector<xla::HloInstruction*> order = entry->MakeInstructionPostOrder();
   std::vector<xla::HloInstruction*> worklist;
@@ -577,7 +581,7 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
       fragment_buffer = InstructionFragment();
       TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
           module, attempt, chunk_index, require_backend_annotations,
-          &fragment_buffer));
+          ignore_backend_annotations, &fragment_buffer));
       if (fragment_buffer.produced_instructions.size() == 1) {
         selected_fragment = std::move(fragment_buffer);
         break;
@@ -597,7 +601,8 @@ SplitModuleWithChunkSize(const xla::HloModule& module, int chunk_size,
 
 tsl::StatusOr<std::vector<InstructionFragment>>
 SplitModuleByBackendAnnotations(const xla::HloModule& module,
-                                bool require_backend_annotations) {
+                                bool require_backend_annotations,
+                                bool ignore_backend_annotations) {
   const xla::HloComputation* entry = module.entry_computation();
   std::vector<xla::HloInstruction*> order = entry->MakeInstructionPostOrder();
   std::vector<xla::HloInstruction*> worklist;
@@ -639,7 +644,8 @@ SplitModuleByBackendAnnotations(const xla::HloModule& module,
       InstructionFragment fragment_buffer;
       TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
           module, absl::MakeSpan(current_chunk), chunk_index,
-          require_backend_annotations, &fragment_buffer));
+          require_backend_annotations, ignore_backend_annotations,
+          &fragment_buffer));
       std::vector<std::string> op_names;
       op_names.reserve(current_chunk.size());
       for (const xla::HloInstruction* op : current_chunk) {
@@ -661,7 +667,8 @@ SplitModuleByBackendAnnotations(const xla::HloModule& module,
     InstructionFragment fragment_buffer;
     TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
         module, absl::MakeSpan(current_chunk), chunk_index,
-        require_backend_annotations, &fragment_buffer));
+        require_backend_annotations, ignore_backend_annotations,
+        &fragment_buffer));
     std::vector<std::string> op_names;
     op_names.reserve(current_chunk.size());
     for (const xla::HloInstruction* op : current_chunk) {
@@ -1097,10 +1104,17 @@ std::string DescribePolicy(const FeaturePolicy& policy) {
   return absl::StrCat("cycle(", absl::StrJoin(pieces, "| "), ")");
 }
 
+void ClearBackendOverrides(std::vector<InstructionFragment>* fragments) {
+  for (auto& frag : *fragments) {
+    frag.backend_override.reset();
+  }
+}
+
 absl::Status RunAotCompilationExample(std::string hlo_file,
                                       std::string features_str,
                                       std::string io_prefix,
-                                      bool enable_gpu_backend) {
+                                      bool enable_gpu_backend,
+                                      bool ignore_backend_annotations) {
   xla::CompileOptions compile_options;
   llvm::StringMap<bool, llvm::MallocAllocator> host_machine_features =
       llvm::sys::getHostCPUFeatures();
@@ -1242,11 +1256,20 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     std::vector<FragmentBenchmarkResult> fragment_results;
 
     if (policy.require_annotations()) {
+      if (ignore_backend_annotations) {
+        std::cout << "Ignoring backend annotations even though "
+                     "backend_attribute policy was requested."
+                  << std::endl;
+      }
       TF_ASSIGN_OR_RETURN(auto annotation_fragments,
                           SplitModuleByBackendAnnotations(
-                              *module, policy.require_annotations()));
+                              *module, policy.require_annotations(),
+                              ignore_backend_annotations));
       if (annotation_fragments.empty()) {
         continue;
+      }
+      if (ignore_backend_annotations) {
+        ClearBackendOverrides(&annotation_fragments);
       }
       bool gpu_requested = false;
       for (const auto& frag : annotation_fragments) {
@@ -1342,7 +1365,11 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     for (int chunk_size : chunk_sizes) {
       TF_ASSIGN_OR_RETURN(auto fragments,
                           SplitModuleWithChunkSize(*module, chunk_size,
-                                                   policy.require_annotations()));
+                                                   policy.require_annotations(),
+                                                   ignore_backend_annotations));
+      if (ignore_backend_annotations) {
+        ClearBackendOverrides(&fragments);
+      }
       if (fragments.empty()) {
         continue;
       }
@@ -1430,47 +1457,116 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
 }
 
 int main(int argc, char** argv) {
-  if (argc < 4 || argc > 5) {
+  if (argc < 4) {
     std::cerr << "Usage: " << argv[0]
-              << " <hlo_file> <backend_policy> <io_prefix> [--enable_gpu|--disable_gpu]"
-              << std::endl;
+              << " <hlo_file> <backend_policy> <io_prefix>"
+              << " [--enable_gpu|--disable_gpu]"
+              << " [--cpu-only] [--gpu-only] [--backend_attr]" << std::endl;
     std::cerr << "  <hlo_file>: Path to the HLO text file." << std::endl;
     std::cerr << "  <backend_policy>: CPU feature experiments (e.g. 'all' or "
                  "'cpu:all|gpu')."
               << std::endl;
     std::cerr << "  <io_prefix>: Prefix path for input/output literal files."
               << std::endl;
-    std::cerr << "  Optional fourth arg toggles GPU splitting (default: off)."
+    std::cerr << "  Optional flags:" << std::endl;
+    std::cerr << "    --enable_gpu/--disable_gpu: toggle GPU usage (default: off)."
+              << std::endl;
+    std::cerr << "    --cpu-only: also run a CPU-only configuration."
+              << std::endl;
+    std::cerr << "    --gpu-only: also run a GPU-only configuration (implies GPU enabled unless explicitly disabled)."
+              << std::endl;
+    std::cerr << "    --backend_attr: also run the backend_attribute configuration."
               << std::endl;
     return 1;
   }
+
+  struct RunConfig {
+    std::string label;
+    std::string feature_spec;
+    bool enable_gpu = false;
+    bool ignore_backend_annotations = false;
+  };
+
   std::string hlo_file = argv[1];
   std::string features = argv[2];
   std::string io_prefix = argv[3];
   bool enable_gpu_backend = false;
-  if (argc == 5) {
-    std::string flag = argv[4];
+  bool gpu_toggle_explicit = false;
+  bool run_cpu_only = false;
+  bool run_gpu_only = false;
+  bool run_backend_attr = false;
+
+  for (int i = 4; i < argc; ++i) {
+    std::string flag = argv[i];
     std::string lowered = absl::AsciiStrToLower(flag);
     if (lowered == "--enable_gpu" || lowered == "enable_gpu" ||
         lowered == "1" || lowered == "true") {
       enable_gpu_backend = true;
+      gpu_toggle_explicit = true;
     } else if (lowered == "--disable_gpu" || lowered == "disable_gpu" ||
                lowered == "0" || lowered == "false") {
       enable_gpu_backend = false;
+      gpu_toggle_explicit = true;
+    } else if (lowered == "--cpu-only" || lowered == "cpu-only") {
+      run_cpu_only = true;
+    } else if (lowered == "--gpu-only" || lowered == "gpu-only") {
+      run_gpu_only = true;
+    } else if (lowered == "--backend_attr" || lowered == "backend_attr" ||
+               lowered == "--backend-attr" || lowered == "backend-attr") {
+      run_backend_attr = true;
     } else {
-      std::cerr << "Unrecognized GPU toggle '" << flag
-                << "'. Use --enable_gpu/--disable_gpu or true/false."
-                << std::endl;
+      std::cerr << "Unrecognized flag '" << flag << "'" << std::endl;
       return 1;
     }
   }
 
-  absl::Status status =
-      RunAotCompilationExample(hlo_file, features, io_prefix,
-                               enable_gpu_backend);
-  if (!status.ok()) {
-    std::cerr << "Error: " << status.ToString() << std::endl;
+  // GPU-only/backend_attr imply GPU usage unless explicitly disabled.
+  if ((run_gpu_only || run_backend_attr) && !gpu_toggle_explicit) {
+    enable_gpu_backend = true;
+  }
+  if ((run_gpu_only || run_backend_attr) && !enable_gpu_backend) {
+    std::cerr << "GPU requested but explicitly disabled. Remove --disable_gpu "
+                 "or enable GPU to run requested configurations."
+              << std::endl;
     return 1;
+  }
+
+  std::vector<RunConfig> runs;
+  if (run_cpu_only || run_gpu_only || run_backend_attr) {
+    if (run_cpu_only) {
+      runs.push_back(
+          RunConfig{"cpu-only", /*feature_spec=*/"", /*enable_gpu=*/false,
+                    /*ignore_backend_annotations=*/true});
+    }
+    if (run_gpu_only) {
+      runs.push_back(
+          RunConfig{"gpu-only", /*feature_spec=*/"gpu", /*enable_gpu=*/true,
+                    /*ignore_backend_annotations=*/true});
+    }
+    if (run_backend_attr) {
+      runs.push_back(
+          RunConfig{"backend_attr", /*feature_spec=*/"backend_attribute",
+                    enable_gpu_backend, /*ignore_backend_annotations=*/false});
+    }
+  } else {
+    runs.push_back(RunConfig{"custom", features, enable_gpu_backend,
+                             /*ignore_backend_annotations=*/false});
+  }
+
+  for (const RunConfig& config : runs) {
+    std::cout << "=== Running configuration '" << config.label
+              << "' with feature spec '" << config.feature_spec
+              << "' (GPU " << (config.enable_gpu ? "enabled" : "disabled")
+              << ") ===" << std::endl;
+    absl::Status status =
+        RunAotCompilationExample(hlo_file, config.feature_spec, io_prefix,
+                                 config.enable_gpu,
+                                 config.ignore_backend_annotations);
+    if (!status.ok()) {
+      std::cerr << "Error in configuration '" << config.label
+                << "': " << status.ToString() << std::endl;
+      return 1;
+    }
   }
   return 0;
 }
