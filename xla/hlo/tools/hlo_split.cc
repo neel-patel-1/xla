@@ -1248,6 +1248,20 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       if (annotation_fragments.empty()) {
         continue;
       }
+      bool gpu_requested = false;
+      for (const auto& frag : annotation_fragments) {
+        if (frag.backend_override.has_value() &&
+            frag.backend_override == BackendKind::kGpu) {
+          gpu_requested = true;
+          break;
+        }
+      }
+      if (gpu_requested && gpu_client == nullptr) {
+        return absl::InvalidArgumentError(
+            "backend_attribute annotations request GPU but GPU backend is "
+            "disabled or unavailable. Re-run with --enable_gpu (or true) or "
+            "remove GPU annotations.");
+      }
       std::cout << "Using backend_attribute policy; skipping chunk-size sweep "
                    "and honoring contiguous annotated fragments only."
                 << std::endl;
