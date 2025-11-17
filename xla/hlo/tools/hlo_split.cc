@@ -123,6 +123,14 @@ std::optional<BackendKind> ParseBackendAnnotation(absl::string_view value) {
   return std::nullopt;
 }
 
+std::string DescribeBackendKindOptional(
+    const std::optional<BackendKind>& kind) {
+  if (!kind.has_value()) {
+    return "unannotated";
+  }
+  return *kind == BackendKind::kGpu ? "gpu" : "cpu";
+}
+
 tsl::StatusOr<std::optional<BackendKind>> ExtractBackendAnnotation(
     const xla::HloInstruction& instr) {
   const auto& attr_map = instr.frontend_attributes().map();
@@ -632,6 +640,15 @@ SplitModuleByBackendAnnotations(const xla::HloModule& module,
       TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
           module, absl::MakeSpan(current_chunk), chunk_index,
           require_backend_annotations, &fragment_buffer));
+      std::vector<std::string> op_names;
+      op_names.reserve(current_chunk.size());
+      for (const xla::HloInstruction* op : current_chunk) {
+        op_names.push_back(std::string(op->name()));
+      }
+      fragment_buffer.description = absl::StrCat(
+          "backend_attr_fragment#", chunk_index,
+          " backend=", DescribeBackendKindOptional(current_backend),
+          " ops=[", absl::StrJoin(op_names, ", "), "]");
       fragments.push_back(std::move(fragment_buffer));
       ++chunk_index;
       current_chunk.clear();
@@ -645,6 +662,15 @@ SplitModuleByBackendAnnotations(const xla::HloModule& module,
     TF_RETURN_IF_ERROR(BuildFragmentFromChunk(
         module, absl::MakeSpan(current_chunk), chunk_index,
         require_backend_annotations, &fragment_buffer));
+    std::vector<std::string> op_names;
+    op_names.reserve(current_chunk.size());
+    for (const xla::HloInstruction* op : current_chunk) {
+      op_names.push_back(std::string(op->name()));
+    }
+    fragment_buffer.description = absl::StrCat(
+        "backend_attr_fragment#", chunk_index,
+        " backend=", DescribeBackendKindOptional(current_backend),
+        " ops=[", absl::StrJoin(op_names, ", "), "]");
     fragments.push_back(std::move(fragment_buffer));
   }
 
@@ -1213,6 +1239,14 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
                               *module, policy.require_annotations()));
       if (annotation_fragments.empty()) {
         continue;
+      }
+      std::cout << "Using backend_attribute policy; skipping chunk-size sweep "
+                   "and honoring contiguous annotated fragments only."
+                << std::endl;
+      std::cout << "Contiguous backend fragments:" << std::endl;
+      for (const auto& frag : annotation_fragments) {
+        std::cout << "  [" << frag.chunk_index << "] " << frag.description
+                  << std::endl;
       }
       TF_ASSIGN_OR_RETURN(auto compiled_frags,
                           CompileFragments(annotation_fragments,
