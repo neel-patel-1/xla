@@ -413,6 +413,59 @@ tsl::StatusOr<xla::Literal> LoadLiteralFromProtoFile(const std::string& path) {
   return lit;
 }
 
+tsl::StatusOr<std::vector<xla::Literal>> GenerateInputLiterals(
+    const xla::HloModule& module) {
+  return xla::MakeFakeArguments(&module, /*pseudo_random=*/true);
+}
+
+tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteFullOnCpu(
+    const xla::HloModule& module,
+    absl::Span<const xla::Literal> input_literals,
+    const xla::CompileOptions& compile_options,
+    xla::PjRtCpuClient* cpu_client) {
+  xla::XlaComputation computation(module.ToProto());
+  TF_ASSIGN_OR_RETURN(auto exec,
+                      cpu_client->Compile(computation, compile_options));
+  TF_ASSIGN_OR_RETURN(xla::PjRtDevice * device,
+                      GetDefaultDevice(cpu_client, "CPU"));
+
+  TF_ASSIGN_OR_RETURN(auto input_buffers,
+                      PrepareArgumentBuffers(input_literals, device));
+  std::vector<xla::PjRtBuffer*> arg_ptrs;
+  arg_ptrs.reserve(input_buffers.size());
+  for (auto& buf : input_buffers) {
+    arg_ptrs.push_back(buf.get());
+  }
+
+  xla::ExecuteOptions exec_opts;
+  exec_opts.untuple_result = true;
+  exec_opts.arguments_are_tupled = false;
+  exec_opts.execution_mode = xla::ExecuteOptions::ExecutionMode::kSynchronous;
+
+  TF_ASSIGN_OR_RETURN(auto exec_outputs,
+                      exec->ExecuteSharded(arg_ptrs, device, exec_opts));
+  if (exec_outputs.empty()) {
+    return absl::InternalError("CPU execution returned no outputs");
+  }
+  for (auto& buf : exec_outputs) {
+    TF_RETURN_IF_ERROR(buf->GetReadyFuture().Await());
+  }
+  if (exec_outputs.size() == 1) {
+    TF_ASSIGN_OR_RETURN(auto lit_ptr, exec_outputs[0]->ToLiteralSync());
+    return lit_ptr;
+  }
+
+  std::vector<xla::Literal> leaves;
+  leaves.reserve(exec_outputs.size());
+  for (auto& buf : exec_outputs) {
+    TF_ASSIGN_OR_RETURN(auto lit_ptr, buf->ToLiteralSync());
+    leaves.push_back(lit_ptr->Clone());
+  }
+  xla::Literal tuple_lit =
+      xla::LiteralUtil::MakeTupleOwned(std::move(leaves));
+  return std::make_shared<xla::Literal>(std::move(tuple_lit));
+}
+
 absl::Status BuildFragmentFromChunk(
     const xla::HloModule& module,
     absl::Span<xla::HloInstruction* const> chunk_instructions, int chunk_index,
@@ -1178,10 +1231,25 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
   int num_params = module->entry_computation_layout().parameter_count();
   std::vector<xla::Literal> input_lits;
   input_lits.reserve(num_params);
+  bool all_input_files_present = true;
   for (int i = 0; i < num_params; ++i) {
     std::string path = absl::StrCat(io_prefix, "/input_", i, ".litpb");
+    std::ifstream probe(path);
+    if (!probe.good()) {
+      all_input_files_present = false;
+      break;
+    }
     TF_ASSIGN_OR_RETURN(auto lit, LoadLiteralFromProtoFile(path));
     input_lits.push_back(std::move(lit));
+  }
+  bool synthetic_inputs = false;
+  if (!all_input_files_present) {
+    TF_ASSIGN_OR_RETURN(auto generated, GenerateInputLiterals(*module));
+    input_lits = std::move(generated);
+    synthetic_inputs = true;
+    std::cout << "Input literals missing; generated synthetic inputs from "
+                 "program shapes."
+              << std::endl;
   }
 
   TF_ASSIGN_OR_RETURN(xla::PjRtDevice * cpu_device,
@@ -1197,8 +1265,17 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
   }
 
   std::string ref_path = absl::StrCat(io_prefix, "/output_0.ref.litpb");
-  TF_ASSIGN_OR_RETURN(xla::Literal ref_lit,
-                      LoadLiteralFromProtoFile(ref_path));
+  xla::Literal ref_lit;
+  bool ref_loaded_from_file = false;
+  {
+    std::ifstream probe(ref_path);
+    if (probe.good() && !synthetic_inputs) {
+      TF_ASSIGN_OR_RETURN(auto loaded, LoadLiteralFromProtoFile(ref_path));
+      ref_lit = std::move(loaded);
+      ref_loaded_from_file = true;
+    }
+  }
+  bool need_cpu_reference = synthetic_inputs || !ref_loaded_from_file;
 
   // Determine granularity options based on non-parameter instruction count.
   int non_param_instructions = 0;
@@ -1219,6 +1296,34 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
   }
 
   auto feature_experiments = ParseFeatureExperiments(features_str);
+  bool cpu_present = false;
+  for (const auto& raw_tokens : feature_experiments) {
+    bool has_cpu = raw_tokens.empty();
+    for (const std::string& token : raw_tokens) {
+      std::string lowered = absl::AsciiStrToLower(token);
+      if (lowered == "backend_attribute") {
+        continue;
+      }
+      if (lowered.empty() || absl::StartsWith(lowered, "cpu")) {
+        has_cpu = true;
+      }
+    }
+    cpu_present |= has_cpu;
+  }
+  if (need_cpu_reference && !cpu_present) {
+    return absl::InvalidArgumentError(
+        "CPU backend must be included when input/output data is missing to "
+        "generate reference outputs. Include a CPU backend in backend_policy.");
+  }
+
+  if (need_cpu_reference) {
+    TF_ASSIGN_OR_RETURN(
+        auto cpu_ref_ptr,
+        ExecuteFullOnCpu(*module, input_span, compile_options, cpu_client));
+    ref_lit = *cpu_ref_ptr;
+    ref_loaded_from_file = true;
+    std::cout << "Generated reference outputs on CPU." << std::endl;
+  }
   auto print_summary = [](absl::string_view label,
                           const BenchmarkStats& stats) {
     std::cout << label << " mean: " << stats.mean_ms
@@ -1245,6 +1350,15 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     }
     if (backend_tokens.empty()) {
       backend_tokens.push_back(BackendToken{BackendKind::kCpu, ""});
+    }
+    // Ensure CPU runs first when present (important for reference generation).
+    auto cpu_it = std::find_if(
+        backend_tokens.begin(), backend_tokens.end(),
+        [](const BackendToken& t) { return t.kind == BackendKind::kCpu; });
+    if (cpu_it != backend_tokens.end() && cpu_it != backend_tokens.begin()) {
+      BackendToken cpu_tok = *cpu_it;
+      backend_tokens.erase(cpu_it);
+      backend_tokens.insert(backend_tokens.begin(), cpu_tok);
     }
     FeaturePolicy policy(std::move(backend_tokens), require_annotations);
     std::cout << "=== Feature policy: " << DescribePolicy(policy) << " ==="
