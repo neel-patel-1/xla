@@ -424,8 +424,17 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteFullOnCpu(
     const xla::CompileOptions& compile_options,
     xla::PjRtCpuClient* cpu_client) {
   xla::XlaComputation computation(module.ToProto());
-  TF_ASSIGN_OR_RETURN(auto exec,
-                      cpu_client->Compile(computation, compile_options));
+  auto aot_options = std::make_unique<xla::cpu::CpuAotCompilationOptions>(
+      /*triple=*/"x86_64-unknown-linux-gnu", /*cpu_name=*/"sapphirerapids",
+      /*features=*/"",
+      /*entry_point_name=*/"main.1",
+      /*relocation_model=*/
+      xla::cpu::CpuAotCompilationOptions::RelocationModel::Static);
+
+  TF_ASSIGN_OR_RETURN(
+      auto exec,
+      cpu_client->CompileAheadOfTimeAndLoad(computation, compile_options,
+                                            *aot_options));
   TF_ASSIGN_OR_RETURN(xla::PjRtDevice * device,
                       GetDefaultDevice(cpu_client, "CPU"));
 
@@ -1320,7 +1329,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     TF_ASSIGN_OR_RETURN(
         auto cpu_ref_ptr,
         ExecuteFullOnCpu(*module, input_span, compile_options, cpu_client));
-    ref_lit = *cpu_ref_ptr;
+    ref_lit = std::move(*cpu_ref_ptr);
     ref_loaded_from_file = true;
     std::cout << "Generated reference outputs on CPU." << std::endl;
   }
