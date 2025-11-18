@@ -38,6 +38,7 @@
 #include "xla/hlo/ir/hlo_module.h"
 #include "xla/hlo/ir/hlo_computation.h"
 #include "xla/hlo/ir/hlo_instruction.h"
+#include "xla/hlo/ir/hlo_clone_context.h"
 #include "xla/shape_util.h"
 #include "xla/tests/test_utils.h"
 
@@ -427,6 +428,7 @@ absl::Status BuildFragmentFromChunk(
       absl::StrCat("chunk_", chunk_index), cfg);
   xla::HloComputation::Builder builder(
       absl::StrCat("chunk_", chunk_index, "_entry"));
+  xla::HloCloneContext clone_context(frag.get());
 
   absl::flat_hash_set<const xla::HloInstruction*> chunk_set(
       chunk_instructions.begin(), chunk_instructions.end());
@@ -536,6 +538,30 @@ absl::Status BuildFragmentFromChunk(
         xla::HloInstruction::CreateTuple(produced_clones));
   }
   xla::HloComputation* comp = frag->AddEntryComputation(builder.Build(root));
+
+  auto ensure_cloned_computation =
+      [&](const xla::HloComputation* original)
+          -> xla::HloComputation* {
+        if (auto* existing = clone_context.FindComputation(original)) {
+          return existing;
+        }
+        auto cloned_comp =
+            original->CloneInContext(clone_context, /*replacements=*/nullptr,
+                                     /*extra_parameters=*/{},
+                                     /*suffix=*/"");
+        xla::HloComputation* cloned_ptr = cloned_comp.get();
+        frag->AddEmbeddedComputation(std::move(cloned_comp));
+        return cloned_ptr;
+      };
+
+  for (xla::HloInstruction* instr : comp->instructions()) {
+    if (instr->called_computations().empty()) {
+      continue;
+    }
+    instr->ReplaceCalledComputations([&](xla::HloComputation* callee) {
+      return ensure_cloned_computation(callee);
+    });
+  }
   frag->mutable_config().SetDefaultComputationLayout(
       comp->ComputeProgramShape());
 
