@@ -1099,7 +1099,7 @@ tsl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
     const xla::CompileOptions& compile_options,
     absl::Span<const xla::Literal> input_literals,
     xla::PjRtCpuClient* cpu_client, xla::PjRtClient* gpu_client,
-    const xla::Literal& ref_lit) {
+    const xla::Literal& ref_lit, bool skip_compare = false) {
   std::unique_ptr<xla::PjRtLoadedExecutable> executable;
   xla::PjRtDevice* device = nullptr;
   std::vector<std::unique_ptr<xla::PjRtBuffer>> arg_buffers;
@@ -1152,18 +1152,20 @@ tsl::StatusOr<BenchmarkStats> BenchmarkFullExecution(
   TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
   TF_ASSIGN_OR_RETURN(std::shared_ptr<xla::Literal> full_out,
                       result_buffers[0]->ToLiteralSync());
-  auto compare_status =
-      literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-1, 1e-1),
-                               std::nullopt, nullptr);
-  if (!compare_status.ok()) {
-    std::cout << "Full execution (target=" << backend.DebugString()
-              << ") output does NOT match reference!" << std::endl;
-    LogLiteralMismatch(
-        absl::StrCat("Full execution (target=", backend.DebugString(), ")"),
-        ref_lit, *full_out);
-  } else {
-    std::cout << "Full execution (target=" << backend.DebugString()
-              << ") output matches reference." << std::endl;
+  if (!skip_compare) {
+    auto compare_status =
+        literal_comparison::Near(ref_lit, *full_out, ErrorSpec(1e-1, 1e-1),
+                                 std::nullopt, nullptr);
+    if (!compare_status.ok()) {
+      std::cout << "Full execution (target=" << backend.DebugString()
+                << ") output does NOT match reference!" << std::endl;
+      LogLiteralMismatch(
+          absl::StrCat("Full execution (target=", backend.DebugString(), ")"),
+          ref_lit, *full_out);
+    } else {
+      std::cout << "Full execution (target=" << backend.DebugString()
+                << ") output matches reference." << std::endl;
+    }
   }
 
   auto run_full_once = [&]() -> absl::Status {
@@ -1285,6 +1287,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     }
   }
   bool need_cpu_reference = synthetic_inputs || !ref_loaded_from_file;
+  bool ref_generated_on_cpu = false;
 
   // Determine granularity options based on non-parameter instruction count.
   int non_param_instructions = 0;
@@ -1320,9 +1323,12 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
     cpu_present |= has_cpu;
   }
   if (need_cpu_reference && !cpu_present) {
-    return absl::InvalidArgumentError(
-        "CPU backend must be included when input/output data is missing to "
-        "generate reference outputs. Include a CPU backend in backend_policy.");
+    std::cout << "Missing CPU backend while inputs/outputs are absent; "
+                 "inserting a CPU run to generate reference outputs."
+              << std::endl;
+    feature_experiments.insert(feature_experiments.begin(),
+                               std::vector<std::string>{"cpu"});
+    cpu_present = true;
   }
 
   if (need_cpu_reference) {
@@ -1331,6 +1337,7 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
         ExecuteFullOnCpu(*module, input_span, compile_options, cpu_client));
     ref_lit = std::move(*cpu_ref_ptr);
     ref_loaded_from_file = true;
+    ref_generated_on_cpu = true;
     std::cout << "Generated reference outputs on CPU." << std::endl;
   }
   auto print_summary = [](absl::string_view label,
@@ -1380,7 +1387,9 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
         TF_ASSIGN_OR_RETURN(
             BenchmarkStats stats,
             BenchmarkFullExecution(token, *module, compile_options, input_span,
-                                   cpu_client, gpu_client, ref_lit));
+                                   cpu_client, gpu_client, ref_lit,
+                                   /*skip_compare=*/ref_generated_on_cpu &&
+                                       token.kind == BackendKind::kCpu));
         std::string key = token.DebugString();
         full_stats_map[key] = stats;
         print_summary(
