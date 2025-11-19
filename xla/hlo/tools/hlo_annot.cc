@@ -169,7 +169,9 @@ tsl::Status RunExecutableOnce(
   }
   TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
   TF_ASSIGN_OR_RETURN(auto literal, result_buffers[0]->ToLiteralSync());
-  *literal_out = literal;
+  if (literal_out != nullptr){
+    *literal_out = literal;
+  }
   return absl::OkStatus();
 }
 
