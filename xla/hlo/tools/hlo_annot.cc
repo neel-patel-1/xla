@@ -330,7 +330,7 @@ int main(int argc, char** argv) {
   std::string hlo_file = argv[1];
 
 
-  absl::Status status = RunOnce(argv[1]);
+  absl::Status status = Run(argv[1]);
   if(!status.ok()) {
     std::cerr << "Error: " << status.ToString() << std::endl;
     return 1;
