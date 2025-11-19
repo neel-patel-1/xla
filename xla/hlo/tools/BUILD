@@ -217,6 +217,37 @@ cc_binary(
     ]),
 )
 
+cc_binary(
+    name = "hlo_annot",
+    srcs = ["hlo_annot.cc"],
+    testonly = True,
+    deps = [
+        "//xla/hlo/parser:hlo_parser",
+        "//xla/stream_executor/host:host_platform",
+        "//xla/service:service",
+        "//xla/service/cpu:cpu_compiler",
+        "//xla/service/cpu:cpu_runtime",
+        "//xla/pjrt/proto:compile_options_proto_cc",
+        "//xla/pjrt/proto:pjrt_value_type_proto_cc",  # Add this for pjrt_value_type.pb.h
+        "//xla/pjrt/proto:pjrt_device_dimensions_proto_cc",
+        "//xla/pjrt/proto:executable_metadata_proto_cc",
+        "//xla/pjrt/proto:execute_options_proto_cc",
+        "//xla/pjrt/proto:pjrt_partial_program_proto_cc",
+        "//xla/pjrt/proto:topology_description_proto_cc",
+        "//xla/pjrt/plugin/xla_cpu:cpu_topology_description",
+        "//xla/pjrt/cpu:cpu_client",
+        "//xla/pjrt:async_work_runner",
+        "//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "//xla/pjrt/plugin/xla_gpu:xla_gpu_pjrt_client",
+        "//xla/hlo/testlib:verified_hlo_module",
+        "//xla/tests:test_utils",
+        "//xla/tests:literal_test_util",
+    ] + if_cuda([
+        "//xla/service:gpu_plugin",
+        "//xla/stream_executor:cuda_platform",
+    ]),
+)
+
 py_strict_library(
     name = "generate_hlo_test_checks_lib",
     srcs = ["generate_hlo_test_checks.py"],
