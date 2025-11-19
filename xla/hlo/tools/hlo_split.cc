@@ -403,10 +403,26 @@ absl::Status RunFragmentsSequentiallyCpuOnly(
         continue;
       }
       if (frag.produced_instructions.size() == exec_outputs.size()) {
+        std::vector<std::shared_ptr<xla::Literal>> lit_ptrs(
+            exec_outputs.size());
         for (int i = 0; i < exec_outputs.size(); ++i) {
           TF_RETURN_IF_ERROR(exec_outputs[i]->GetReadyFuture().Await());
+          TF_ASSIGN_OR_RETURN(auto lit_ptr, exec_outputs[i]->ToLiteralSync());
+          lit_ptrs[i] = lit_ptr;
           value_map[frag.produced_instructions[i]] =
               std::move(exec_outputs[i]);
+        }
+        if (root_literal_override == nullptr &&
+            value_map.find(entry->root_instruction()) == value_map.end()) {
+          std::vector<xla::Literal> leaf_copies;
+          leaf_copies.reserve(lit_ptrs.size());
+          for (const auto& lp : lit_ptrs) {
+            leaf_copies.push_back(lp->Clone());
+          }
+          xla::Literal tuple_lit =
+              xla::LiteralUtil::MakeTupleOwned(std::move(leaf_copies));
+          root_literal_override =
+              std::make_shared<xla::Literal>(std::move(tuple_lit));
         }
         continue;
       }
@@ -1025,6 +1041,12 @@ absl::Status RunFragmentsSequentiallyMultiBackend(
   const xla::HloInstruction* root = entry->root_instruction();
   auto it = value_map.find(root);
   if (it == value_map.end()) {
+    if (root_literal_override != nullptr) {
+      if (literal_out != nullptr) {
+        *literal_out = root_literal_override;
+      }
+      return absl::OkStatus();
+    }
     return absl::InternalError("No value for ROOT instruction");
   }
 
