@@ -201,6 +201,25 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnCpu(
   return literal;
 }
 
+tsl::Status RunExecutableOnce(
+    xla::PjRtLoadedExecutable* executable,
+    absl::Span<xla::PjRtBuffer* const> entry_param_buffers,
+    xla::PjRtDevice* device,
+    const xla::ExecuteOptions& exec_opts,
+    std::shared_ptr<xla::Literal>* literal_out) {
+
+  TF_ASSIGN_OR_RETURN(
+      auto result_buffers,
+      executable->ExecuteSharded(entry_param_buffers, device, exec_opts));
+  if (result_buffers.empty()) {
+    return absl::InternalError("Execution returned no outputs");
+  }
+  TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
+  TF_ASSIGN_OR_RETURN(auto literal, result_buffers[0]->ToLiteralSync());
+  *literal_out = literal;
+  return absl::OkStatus();
+}
+
 tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnGpu(
     const xla::HloModule& module,
     absl::Span<const xla::Literal> input_literals) {
