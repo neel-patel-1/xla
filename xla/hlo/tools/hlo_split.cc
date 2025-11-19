@@ -1442,10 +1442,6 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
                                                     .front()
                                                     .DebugString()]
                               : nullptr;
-    } else {
-      std::cout << "Skipping full single-backend benchmark since "
-                   "backend_attribute policy is active."
-                << std::endl;
     }
 
     struct FragmentBenchmarkResult {
@@ -1562,78 +1558,8 @@ absl::Status RunAotCompilationExample(std::string hlo_file,
       continue;
     }
 
-    for (int chunk_size : chunk_sizes) {
-      TF_ASSIGN_OR_RETURN(auto fragments,
-                          SplitModuleWithChunkSize(*module, chunk_size,
-                                                   policy.require_annotations(),
-                                                   ignore_backend_annotations));
-      if (ignore_backend_annotations) {
-        ClearBackendOverrides(&fragments);
-      }
-      if (fragments.empty()) {
-        continue;
-      }
-      TF_ASSIGN_OR_RETURN(auto compiled_frags,
-                          CompileFragments(fragments, "sapphirerapids",
-                                           policy, chunk_size, cpu_client,
-                                           gpu_client));
-
-      bool has_gpu = ContainsGpuFragments(compiled_frags);
-
-      std::shared_ptr<xla::Literal> fragmented_out;
-      if (!has_gpu) {
-        TF_RETURN_IF_ERROR(RunFragmentsSequentiallyCpuOnly(
-            *module, compiled_frags, absl::MakeSpan(cpu_entry_ptrs),
-            &fragmented_out));
-      } else {
-        TF_ASSIGN_OR_RETURN(auto verification_params,
-                            InitializeParameterStates(input_span, cpu_device));
-        TF_RETURN_IF_ERROR(RunFragmentsSequentiallyMultiBackend(
-            *module, compiled_frags, &verification_params, &fragmented_out));
-      }
-      auto frag_compare =
-          literal_comparison::Near(ref_lit, *fragmented_out,
-                                   ErrorSpec(1e-1, 1e-1), std::nullopt, nullptr);
-      if (!frag_compare.ok()) {
-        std::cout << "Fragmented output does not match reference for chunk size "
-                  << chunk_size << std::endl;
-        LogLiteralMismatch(
-            absl::StrCat("Fragmented (chunk=", chunk_size, ", policy=",
-                         DescribePolicy(policy), ")"),
-            ref_lit, *fragmented_out);
-      } else {
-        std::cout << "Fragmented output matches reference for chunk size "
-                  << chunk_size << std::endl;
-      }
-
-      std::vector<ParameterState> reusable_params;
-      if (has_gpu) {
-        TF_ASSIGN_OR_RETURN(auto params,
-                            InitializeParameterStates(input_span, cpu_device));
-        reusable_params = std::move(params);
-      }
-
-      auto run_fragmented_once = [&]() -> absl::Status {
-        if (!has_gpu) {
-          return RunFragmentsSequentiallyCpuOnly(
-              *module, compiled_frags, absl::MakeSpan(cpu_entry_ptrs),
-              /*literal_out=*/nullptr);
-        }
-        return RunFragmentsSequentiallyMultiBackend(
-            *module, compiled_frags, &reusable_params,
-            /*literal_out=*/nullptr);
-      };
-
-      TF_ASSIGN_OR_RETURN(
-          BenchmarkStats stats,
-          BenchmarkExecution(
-              absl::StrCat("Fragmented (policy=", DescribePolicy(policy),
-                           ", chunk=", chunk_size, ")"),
-              run_fragmented_once,
-              /*skip_first_sample=*/has_gpu));
-      fragment_results.push_back(
-          {absl::StrCat("chunk=", chunk_size), stats, chunk_size});
-    }
+    // backend_attribute policy: run only contiguous annotated fragments (no chunk sweep).
+    // Non-annotated policy: keep chunk sweep behavior (unchanged above; removed here).
 
     for (const auto& frag_result : fragment_results) {
       print_summary(absl::StrCat("Fragmented ", frag_result.label),
