@@ -162,6 +162,17 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnCpu(
   return literal;
 }
 
+absl::Status RunOnce(const std::string& hlo_file) {
+  TF_ASSIGN_OR_RETURN(auto module, LoadModuleFromFile(hlo_file));
+  TF_ASSIGN_OR_RETURN(auto inputs, GenerateInputLiterals(*module));
+  TF_ASSIGN_OR_RETURN(auto output,
+                      ExecuteModuleOnCpu(*module, absl::MakeConstSpan(inputs)));
+  std::cout << "Output shape: "
+            << xla::ShapeUtil::HumanString(output->shape()) << std::endl;
+  std::cout << output->ToStringWithoutShape() << std::endl;
+  return absl::OkStatus();
+}
+
 int main(int argc, char** argv) {
   if (argc < 1) {
     std::cerr << "Usage: " << argv[0]
@@ -169,8 +180,15 @@ int main(int argc, char** argv) {
               << std::endl;
     return 1;
   }
-
   std::string hlo_file = argv[1];
+
+
+  absl::Status status = RunOnce(argv[1]);
+  if(!status.ok()) {
+    std::cerr << "Error: " << status.ToString() << std::endl;
+    return 1;
+  }
+
 
   return 0;
 }
