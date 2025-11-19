@@ -402,6 +402,14 @@ absl::Status RunFragmentsSequentiallyCpuOnly(
         }
         continue;
       }
+      if (frag.produced_instructions.size() == exec_outputs.size()) {
+        for (int i = 0; i < exec_outputs.size(); ++i) {
+          TF_RETURN_IF_ERROR(exec_outputs[i]->GetReadyFuture().Await());
+          value_map[frag.produced_instructions[i]] =
+              std::move(exec_outputs[i]);
+        }
+        continue;
+      }
       return absl::InternalError(
           absl::StrCat("Expected a single output buffer from fragment ",
                        frag.description, ", got ", exec_outputs.size()));
@@ -905,6 +913,7 @@ absl::Status RunFragmentsSequentiallyMultiBackend(
                       std::unique_ptr<xla::PjRtBuffer>>
       value_map;
   const xla::HloComputation* entry = original.entry_computation();
+  std::shared_ptr<xla::Literal> root_literal_override;
 
   xla::ExecuteOptions exec_opts;
   exec_opts.execution_mode = xla::ExecuteOptions::ExecutionMode::kSynchronous;
@@ -952,6 +961,49 @@ absl::Status RunFragmentsSequentiallyMultiBackend(
         std::vector<std::unique_ptr<xla::PjRtBuffer>> exec_outputs,
         cf.exec->ExecuteSharded(arg_ptrs, target_device, exec_opts));
     if (exec_outputs.size() != 1) {
+      if (frag.produced_instructions.size() == 1) {
+        const xla::HloInstruction* tuple_instr =
+            frag.produced_instructions.front();
+        std::vector<xla::Literal> leaves;
+        leaves.reserve(exec_outputs.size());
+        for (auto& buf_ptr : exec_outputs) {
+          TF_RETURN_IF_ERROR(buf_ptr->GetReadyFuture().Await());
+          TF_ASSIGN_OR_RETURN(auto lit_ptr, buf_ptr->ToLiteralSync());
+          leaves.push_back(lit_ptr->Clone());
+        }
+        xla::Literal tuple_lit =
+            xla::LiteralUtil::MakeTupleOwned(std::move(leaves));
+
+        for (xla::HloInstruction* user : tuple_instr->users()) {
+          if (user->opcode() != xla::HloOpcode::kGetTupleElement) {
+            continue;
+          }
+          int64_t idx = user->tuple_index();
+          if (idx < 0 ||
+              idx >= static_cast<int64_t>(exec_outputs.size())) {
+            return absl::InternalError(
+                absl::StrCat("Tuple output index ", idx,
+                             " out of range for fragment ", frag.description));
+          }
+          value_map[user] = std::move(exec_outputs[idx]);
+        }
+
+        if (tuple_instr == entry->root_instruction()) {
+          root_literal_override =
+              std::make_shared<xla::Literal>(std::move(tuple_lit));
+        } else {
+          value_map[tuple_instr] = std::move(exec_outputs[0]);
+        }
+        continue;
+      }
+      if (frag.produced_instructions.size() == exec_outputs.size()) {
+        for (int i = 0; i < exec_outputs.size(); ++i) {
+          TF_RETURN_IF_ERROR(exec_outputs[i]->GetReadyFuture().Await());
+          value_map[frag.produced_instructions[i]] =
+              std::move(exec_outputs[i]);
+        }
+        continue;
+      }
       return absl::InternalError(
           absl::StrCat("Expected a single output buffer from fragment ",
                        frag.description, ", got ", exec_outputs.size()));
