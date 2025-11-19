@@ -70,6 +70,22 @@ tsl::StatusOr<std::unique_ptr<HloModule>> LoadModuleFromFile(
   return module;
 }
 
+tsl::StatusOr<std::vector<xla::Literal>> GenerateInputLiterals(
+    const xla::HloModule& module) {
+  return xla::MakeFakeArguments(&module, /*pseudo_random=*/true);
+}
+
+tsl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> UploadLiteralToDevice(
+    const xla::Literal& literal, xla::PjRtDevice* device) {
+  TF_ASSIGN_OR_RETURN(xla::PjRtMemorySpace * memory_space,
+                      device->default_memory_space());
+  TF_ASSIGN_OR_RETURN(auto buffer,
+                      device->client()->BufferFromHostLiteral(literal,
+                                                              memory_space));
+  TF_RETURN_IF_ERROR(buffer->GetReadyFuture().Await());
+  return buffer;
+}
+
 int main(int argc, char** argv) {
   if (argc < 1) {
     std::cerr << "Usage: " << argv[0]
