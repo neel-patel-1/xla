@@ -205,6 +205,23 @@ tsl::StatusOr<BenchmarkStats> BenchmarkExecuteSharded(
 
 }
 
+tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleWithBackendAnnotations(
+    const xla::HloModule& module, absl::Span<const xla::Literal> input_literals){
+  xla::CompileOptions cpu_compile_options;
+  xla::CpuClientOptions cpu_client_options;
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> cpu_client_holder,
+                      xla::GetXlaPjrtCpuClient(cpu_client_options));
+  auto* cpu_client =
+      tsl::down_cast<xla::PjRtCpuClient*>(cpu_client_holder.get());
+
+  xla::CompileOptions gpu_compile_options;
+  xla::GpuClientOptions gpu_client_options;
+  TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> gpu_client_holder,
+                      xla::GetXlaPjrtGpuClient(gpu_client_options));
+  xla::PjRtClient* gpu_client = gpu_client_holder.get();
+
+}
+
 tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnCpu(
     const xla::HloModule& module,
     absl::Span<const xla::Literal> input_literals) {
