@@ -287,6 +287,12 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnGpu(
   exec_opts.untuple_result = true;
   exec_opts.arguments_are_tupled = false;
 
+  TF_ASSIGN_OR_RETURN(
+    BenchmarkStats stats,
+    BenchmarkExecuteSharded(executable.get(), absl::MakeSpan(arg_ptrs),
+                            device, exec_opts));
+  PrintBenchmarkSummary("[GPU] ExecuteSharded", stats);
+
   TF_ASSIGN_OR_RETURN(auto outputs,
                       executable->ExecuteSharded(arg_ptrs, device, exec_opts));
   if (outputs.empty()) {
@@ -295,17 +301,6 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnGpu(
   TF_RETURN_IF_ERROR(outputs[0]->GetReadyFuture().Await());
   TF_ASSIGN_OR_RETURN(auto literal, outputs[0]->ToLiteralSync());
   return literal;
-}
-
-absl::Status RunOnce(const std::string& hlo_file) {
-  TF_ASSIGN_OR_RETURN(auto module, LoadModuleFromFile(hlo_file));
-  TF_ASSIGN_OR_RETURN(auto inputs, GenerateInputLiterals(*module));
-  TF_ASSIGN_OR_RETURN(auto output,
-                      ExecuteModuleOnCpu(*module, absl::MakeConstSpan(inputs)));
-  std::cout << "Output shape: "
-            << xla::ShapeUtil::HumanString(output->shape()) << std::endl;
-  std::cout << output->ToStringWithoutShape() << std::endl;
-  return absl::OkStatus();
 }
 
 int main(int argc, char** argv) {
