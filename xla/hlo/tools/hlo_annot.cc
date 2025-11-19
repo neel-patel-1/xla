@@ -59,6 +59,45 @@ using xla::HloModule;
 using xla::HloComputation;
 using xla::HloInstruction;
 
+struct BenchmarkStats {
+  double mean_ms = 0.0;
+  double stddev_ms = 0.0;
+  double ci_half_width_ms = 0.0;
+  int runs = 0;
+};
+
+BenchmarkStats ComputeBenchmarkStats(const std::vector<double>& samples) {
+  BenchmarkStats stats;
+  if (samples.empty()) {
+    return stats;
+  }
+  stats.runs = static_cast<int>(samples.size());
+  double sum = 0.0;
+  for (double v : samples) sum += v;
+  stats.mean_ms = sum / samples.size();
+  if (samples.size() > 1) {
+    double variance = 0.0;
+    for (double v : samples) {
+      double delta = v - stats.mean_ms;
+      variance += delta * delta;
+    }
+    variance /= (samples.size() - 1);
+    stats.stddev_ms = std::sqrt(variance);
+    stats.ci_half_width_ms =
+        1.96 * stats.stddev_ms /
+        std::sqrt(static_cast<double>(samples.size()));
+  }
+  return stats;
+}
+
+void PrintBenchmarkSummary(absl::string_view label,
+                           const BenchmarkStats& stats) {
+  std::cout << label << " mean: " << stats.mean_ms
+            << " ms (stddev " << stats.stddev_ms << " ms, 95% CI +/-"
+            << stats.ci_half_width_ms << " ms over " << stats.runs << " runs)"
+            << std::endl;
+}
+
 tsl::StatusOr<xla::PjRtDevice*> GetDefaultDevice(xla::PjRtClient* client) {
   if (client == nullptr) {
     return absl::InvalidArgumentError(
