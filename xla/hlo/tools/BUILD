@@ -184,6 +184,22 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "hlo_aot_gpu_cc",
+    srcs = ["hlo_aot_gpu.cc"],
+    hdrs = ["hlo_aot_gpu.h"],
+    deps = [
+        "//xla/hlo/builder:xla_computation",
+        "//xla/hlo/tools:hlo_aot_cpu_cc",
+        "//xla:literal",
+        "//xla/pjrt:pjrt_client",
+        "//xla/pjrt:pjrt_executable",
+        "//xla/pjrt/plugin/xla_gpu:xla_gpu_pjrt_client",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/types:span",
+        "@tsl//tsl/platform:statusor",
+    ],
+)
 cc_binary(
     name = "hlo_aot",
     srcs = ["hlo_aot.cc"],
@@ -269,6 +285,7 @@ cc_binary(
         "//xla/tests:test_utils",
         "//xla/tests:literal_test_util",
         "//xla/hlo/tools:hlo_aot_cpu_cc",
+        "//xla/hlo/tools:hlo_aot_gpu_cc",
     ] + if_cuda([
         "//xla/service:gpu_plugin",
         "//xla/stream_executor:cuda_platform",
