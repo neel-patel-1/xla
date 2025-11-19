@@ -160,12 +160,32 @@ xla_cc_binary(
 )
 
 cc_library(
+    name = "hlo_aot_common_cc",
+    srcs = ["hlo_aot_common.cc"],
+    hdrs = ["hlo_aot_common.h"],
+    deps = [
+        "//xla:literal",
+        "//xla/pjrt:pjrt_client",
+        "//xla/pjrt:pjrt_executable",
+        "//xla:status_macros",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/strings:strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/time:time",
+        "@com_google_absl//absl/types:span",
+        "@tsl//tsl/platform:status",
+        "@tsl//tsl/platform:statusor",
+    ],
+)
+
+cc_library(
     name = "hlo_aot_cpu_cc",
     srcs = ["hlo_aot_cpu.cc"],
     hdrs = ["hlo_aot_cpu.h"],
     deps = [
         "//xla/hlo/builder:xla_computation",
         "//xla/hlo/ir:hlo",
+        "//xla/hlo/tools:hlo_aot_common_cc",
         "//xla:literal",
         "//xla/pjrt/cpu:cpu_client",
         "//xla/pjrt:pjrt_client",
@@ -173,13 +193,8 @@ cc_library(
         "//xla/service:service",
         "//xla/service/cpu:cpu_compiler",
         "//xla/service/cpu:cpu_runtime",
-        "@com_google_absl//absl/status:status",
-        "@com_google_absl//absl/strings:strings",
-        "@com_google_absl//absl/strings:string_view",
-        "@com_google_absl//absl/time:time",
         "@com_google_absl//absl/types:span",
         "@tsl//tsl/platform:casts",
-        "@tsl//tsl/platform:status",
         "@tsl//tsl/platform:statusor",
     ],
 )
@@ -190,7 +205,7 @@ cc_library(
     hdrs = ["hlo_aot_gpu.h"],
     deps = [
         "//xla/hlo/builder:xla_computation",
-        "//xla/hlo/tools:hlo_aot_cpu_cc",
+        "//xla/hlo/tools:hlo_aot_common_cc",
         "//xla:literal",
         "//xla/pjrt:pjrt_client",
         "//xla/pjrt:pjrt_executable",

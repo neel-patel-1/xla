@@ -83,6 +83,7 @@ tsl::StatusOr<std::vector<xla::Literal>> GenerateInputLiterals(
 
 tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleWithBackendAnnotations(
     const xla::HloModule& module, absl::Span<const xla::Literal> input_literals){
+  /* CPU Client */
   xla::CompileOptions cpu_compile_options;
   xla::CpuClientOptions cpu_client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> cpu_client_holder,
@@ -90,11 +91,17 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleWithBackendAnnotations
   auto* cpu_client =
       tsl::down_cast<xla::PjRtCpuClient*>(cpu_client_holder.get());
 
+  /* GPU Client */
   xla::CompileOptions gpu_compile_options;
   xla::GpuClientOptions gpu_client_options;
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtClient> gpu_client_holder,
                       xla::GetXlaPjrtGpuClient(gpu_client_options));
   xla::PjRtClient* gpu_client = gpu_client_holder.get();
+
+  /* Create vector of modules containing contiguous ops
+    all annotated with the same device */
+
+
 
 }
 

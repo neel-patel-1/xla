@@ -6,7 +6,7 @@
 #include "absl/status/status.h"
 #include "tsl/platform/statusor.h"
 #include "xla/hlo/builder/xla_computation.h"
-#include "xla/hlo/tools/hlo_aot_cpu.h"
+#include "xla/hlo/tools/hlo_aot_common.h"
 #include "xla/pjrt/pjrt_client.h"
 #include "xla/pjrt/pjrt_executable.h"
 #include "xla/pjrt/plugin/xla_gpu/xla_gpu_pjrt_client.h"
