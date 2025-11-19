@@ -288,9 +288,9 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnGpu(
   exec_opts.arguments_are_tupled = false;
 
   TF_ASSIGN_OR_RETURN(
-    BenchmarkStats stats,
-    BenchmarkExecuteSharded(executable.get(), absl::MakeSpan(arg_ptrs),
-                            device, exec_opts));
+      BenchmarkStats stats,
+      BenchmarkExecuteSharded(executable.get(), absl::MakeSpan(arg_ptrs),
+                              device, exec_opts));
   PrintBenchmarkSummary("[GPU] ExecuteSharded", stats);
 
   TF_ASSIGN_OR_RETURN(auto outputs,
@@ -301,6 +301,23 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnGpu(
   TF_RETURN_IF_ERROR(outputs[0]->GetReadyFuture().Await());
   TF_ASSIGN_OR_RETURN(auto literal, outputs[0]->ToLiteralSync());
   return literal;
+}
+
+absl::Status Run(const std::string& hlo_file ) {
+  TF_ASSIGN_OR_RETURN(auto module, LoadModuleFromFile(hlo_file));
+  TF_ASSIGN_OR_RETURN(auto inputs, GenerateInputLiterals(*module));
+  TF_ASSIGN_OR_RETURN(
+      auto output,
+      ExecuteModuleOnCpu(*module, absl::MakeSpan(inputs)));
+  std::cout << "CPU\n Output shape: "
+            << xla::ShapeUtil::HumanString(output->shape()) << std::endl;
+
+  TF_ASSIGN_OR_RETURN(
+      auto gpu_output,
+      ExecuteModuleOnGpu(*module, absl::MakeSpan(inputs)));
+  std::cout << "GPU\n Output shape: "
+            << xla::ShapeUtil::HumanString(gpu_output->shape()) << std::endl;
+  return absl::OkStatus();
 }
 
 int main(int argc, char** argv) {
