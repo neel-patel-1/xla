@@ -86,6 +86,18 @@ tsl::StatusOr<std::unique_ptr<xla::PjRtBuffer>> UploadLiteralToDevice(
   return buffer;
 }
 
+tsl::StatusOr<std::vector<std::unique_ptr<xla::PjRtBuffer>>>
+PrepareArgumentBuffers(absl::Span<const xla::Literal> literals,
+                       xla::PjRtDevice* device) {
+  std::vector<std::unique_ptr<xla::PjRtBuffer>> buffers;
+  buffers.reserve(literals.size());
+  for (const auto& literal : literals) {
+    TF_ASSIGN_OR_RETURN(auto buf, UploadLiteralToDevice(literal, device));
+    buffers.push_back(std::move(buf));
+  }
+  return buffers;
+}
+
 int main(int argc, char** argv) {
   if (argc < 1) {
     std::cerr << "Usage: " << argv[0]
