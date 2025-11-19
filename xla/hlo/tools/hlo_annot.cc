@@ -55,6 +55,21 @@ using xla::HloModule;
 using xla::HloComputation;
 using xla::HloInstruction;
 
+tsl::StatusOr<std::unique_ptr<HloModule>> LoadModuleFromFile(
+    const std::string& path) {
+  std::ifstream in(path);
+  if (!in) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Failed to open HLO file: ", path));
+  }
+  std::stringstream buffer;
+  buffer << in.rdbuf();
+  TF_ASSIGN_OR_RETURN(
+      auto module,
+      ParseAndReturnUnverifiedModule(buffer.str(), HloModuleConfig()));
+  return module;
+}
+
 int main(int argc, char** argv) {
   if (argc < 1) {
     std::cerr << "Usage: " << argv[0]
