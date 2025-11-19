@@ -154,6 +154,55 @@ PrepareArgumentBuffers(absl::Span<const xla::Literal> literals,
   return buffers;
 }
 
+tsl::Status RunExecutableOnce(
+    xla::PjRtLoadedExecutable* executable,
+    absl::Span<xla::PjRtBuffer* const> entry_param_buffers,
+    xla::PjRtDevice* device,
+    const xla::ExecuteOptions& exec_opts,
+    std::shared_ptr<xla::Literal>* literal_out) {
+
+  TF_ASSIGN_OR_RETURN(
+      auto result_buffers,
+      executable->ExecuteSharded(entry_param_buffers, device, exec_opts));
+  if (result_buffers.empty()) {
+    return absl::InternalError("Execution returned no outputs");
+  }
+  TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
+  TF_ASSIGN_OR_RETURN(auto literal, result_buffers[0]->ToLiteralSync());
+  *literal_out = literal;
+  return absl::OkStatus();
+}
+
+tsl::StatusOr<BenchmarkStats> BenchmarkExecuteSharded(
+    xla::PjRtLoadedExecutable* executable,
+    absl::Span<xla::PjRtBuffer* const> entry_param_buffers,
+    xla::PjRtDevice* device,
+    const xla::ExecuteOptions& exec_opts,
+    int max_runs=20) {
+      constexpr double kMaxRelativeCi = 0.05;
+  std::vector<double> samples_ms;
+  for (int run = 0; run < max_runs; ++run) {
+    absl::Time start = absl::Now();
+    TF_RETURN_IF_ERROR(
+        RunExecutableOnce(executable, entry_param_buffers, device, exec_opts,
+                          /*literal_out=*/nullptr));
+    absl::Time end = absl::Now();
+    double duration_ms = absl::ToDoubleMilliseconds(end - start);
+    samples_ms.push_back(duration_ms);
+    if (samples_ms.size() <2) {
+      continue;
+    }
+    BenchmarkStats stats = ComputeBenchmarkStats(samples_ms);
+    double relative_ci =
+        stats.ci_half_width_ms / std::max(stats.mean_ms, 1e-8);
+    if (relative_ci <= kMaxRelativeCi) {
+      return stats;
+    }
+  }
+  return ComputeBenchmarkStats(samples_ms);
+
+}
+
 tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnCpu(
     const xla::HloModule& module,
     absl::Span<const xla::Literal> input_literals) {
@@ -191,6 +240,13 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnCpu(
   exec_opts.untuple_result = true;
   exec_opts.arguments_are_tupled = false;
 
+  TF_ASSIGN_OR_RETURN(
+    BenchmarkStats stats,
+    BenchmarkExecuteSharded(executable.get(), absl::MakeSpan(arg_ptrs),
+                            device, exec_opts));
+  PrintBenchmarkSummary("[CPU] ExecuteSharded", stats);
+
+
   TF_ASSIGN_OR_RETURN(auto outputs,
                       executable->ExecuteSharded(arg_ptrs, device, exec_opts));
   if (outputs.empty()) {
@@ -201,24 +257,6 @@ tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnCpu(
   return literal;
 }
 
-tsl::Status RunExecutableOnce(
-    xla::PjRtLoadedExecutable* executable,
-    absl::Span<xla::PjRtBuffer* const> entry_param_buffers,
-    xla::PjRtDevice* device,
-    const xla::ExecuteOptions& exec_opts,
-    std::shared_ptr<xla::Literal>* literal_out) {
-
-  TF_ASSIGN_OR_RETURN(
-      auto result_buffers,
-      executable->ExecuteSharded(entry_param_buffers, device, exec_opts));
-  if (result_buffers.empty()) {
-    return absl::InternalError("Execution returned no outputs");
-  }
-  TF_RETURN_IF_ERROR(result_buffers[0]->GetReadyFuture().Await());
-  TF_ASSIGN_OR_RETURN(auto literal, result_buffers[0]->ToLiteralSync());
-  *literal_out = literal;
-  return absl::OkStatus();
-}
 
 tsl::StatusOr<std::shared_ptr<xla::Literal>> ExecuteModuleOnGpu(
     const xla::HloModule& module,
