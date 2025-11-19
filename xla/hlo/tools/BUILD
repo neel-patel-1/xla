@@ -159,6 +159,31 @@ xla_cc_binary(
     ],
 )
 
+cc_library(
+    name = "hlo_aot_cpu_cc",
+    srcs = ["hlo_aot_cpu.cc"],
+    hdrs = ["hlo_aot_cpu.h"],
+    deps = [
+        "//xla/hlo/builder:xla_computation",
+        "//xla/hlo/ir:hlo",
+        "//xla:literal",
+        "//xla/pjrt/cpu:cpu_client",
+        "//xla/pjrt:pjrt_client",
+        "//xla/pjrt/plugin/xla_cpu:xla_cpu_pjrt_client",
+        "//xla/service:service",
+        "//xla/service/cpu:cpu_compiler",
+        "//xla/service/cpu:cpu_runtime",
+        "@com_google_absl//absl/status:status",
+        "@com_google_absl//absl/strings:strings",
+        "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/time:time",
+        "@com_google_absl//absl/types:span",
+        "@tsl//tsl/platform:casts",
+        "@tsl//tsl/platform:status",
+        "@tsl//tsl/platform:statusor",
+    ],
+)
+
 cc_binary(
     name = "hlo_aot",
     srcs = ["hlo_aot.cc"],
@@ -211,6 +236,7 @@ cc_binary(
         "//xla/hlo/testlib:verified_hlo_module",
         "//xla/tests:test_utils",
         "//xla/tests:literal_test_util",
+        "//xla/hlo/tools:hlo_aot_cpu_cc"
     ] + if_cuda([
         "//xla/service:gpu_plugin",
         "//xla/stream_executor:cuda_platform",
@@ -242,6 +268,7 @@ cc_binary(
         "//xla/hlo/testlib:verified_hlo_module",
         "//xla/tests:test_utils",
         "//xla/tests:literal_test_util",
+        "//xla/hlo/tools:hlo_aot_cpu_cc",
     ] + if_cuda([
         "//xla/service:gpu_plugin",
         "//xla/stream_executor:cuda_platform",
